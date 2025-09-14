@@ -1,0 +1,12 @@
+# Thư mục môi trường ảo
+.venv/
+venv/
+
+# Cache Python
+__pycache__/
+*.pyc
+
+# Thư viện model
+*.dll
+*.lib
+*.pyd

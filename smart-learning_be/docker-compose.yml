@@ -1,0 +1,8 @@
+services:
+  api:
+    build: ./backend
+    container_name: smart_learning_api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
