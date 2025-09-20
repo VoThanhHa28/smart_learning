@@ -1,15 +1,18 @@
+from langchain_huggingface import HuggingFaceEmbeddings
 import os
-from functools import lru_cache
 
-# Nếu chưa cài: pip install sentence-transformers
-from sentence_transformers import SentenceTransformer
-import torch
+EMBED_MODEL = os.getenv("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+EMBED_BATCH = int(os.getenv("EMBED_BATCH", "32"))
 
-MODEL_NAME = os.getenv("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
-# Tự chọn GPU nếu có (có thể ép EMBED_DEVICE=cpu)
-DEVICE = "cuda" if (torch.cuda.is_available() and os.getenv("EMBED_DEVICE", "auto") != "cpu") else "cpu"
+# Tạo 1 singleton để dùng chung
+_embeddings = None
 
-@lru_cache(maxsize=1)
-def get_model() -> SentenceTransformer:
-    model = SentenceTransformer(MODEL_NAME, device=DEVICE)
-    return model
+def get_embeddings():
+    global _embeddings
+    if _embeddings is None:
+        _embeddings = HuggingFaceEmbeddings(
+            model_name=EMBED_MODEL,
+            encode_kwargs={"batch_size": EMBED_BATCH, "normalize_embeddings": True},
+            multi_process=False,
+        )
+    return _embeddings

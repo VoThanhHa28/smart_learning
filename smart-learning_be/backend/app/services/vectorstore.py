@@ -1,44 +1,73 @@
 import os
-import chromadb
-from chromadb.config import Settings
-from typing import List, Dict, Any
+from typing import List, Optional
+import pinecone
+from langchain_pinecone import Pinecone
+from langchain_core.documents import Document
+from .embedding import get_embeddings
+from pinecone import ServerlessSpec
+from collections import defaultdict
 
-def get_client():
-    persist_dir = os.getenv("CHROMA_DIR", "./chroma_data")
-    os.makedirs(persist_dir, exist_ok=True)
-    return chromadb.Client(Settings(is_persistent=True, persist_directory=persist_dir))
+INDEX_NAME = os.getenv("PINECONE_INDEX", "smart-learning")
 
-def collection_name(doc_id: str) -> str:
-    # để mỗi doc 1 collection riêng (đơn giản, dễ dọn dẹp)
-    return f"doc_{doc_id}"
 
-def upsert_chunks(doc_id: str, chunks: List[str], metadatas: List[Dict[str, Any]]):
-    client = get_client()
-    coll = client.get_or_create_collection(collection_name(doc_id))
-    ids = [f"{doc_id}_{i}" for i in range(len(chunks))]
-    coll.upsert(documents=chunks, metadatas=metadatas, ids=ids)
+_pc = None
+_vs = None
 
-def query(doc_id: str, query_text: str, n_results: int = 5):
-    client = get_client()
-    coll = client.get_or_create_collection(collection_name(doc_id))
-    res = coll.query(query_texts=[query_text], n_results=n_results)
+def init_pinecone():
+    global _pc
+    if _pc is not None:
+        return _pc
+    api_key = os.getenv("PINECONE_API_KEY")
+    if not api_key:
+        raise ValueError("⚠️ PINECONE_API_KEY chưa được set trong .env")
+    _pc = pinecone.Pinecone(api_key=api_key)
+    # chỉ check tạo index 1 lần
+    if INDEX_NAME not in [idx.name for idx in _pc.list_indexes()]:
+        dim = len(get_embeddings().embed_query("test"))
+        _pc.create_index(
+            name=INDEX_NAME,
+            dimension=dim,
+            metric="cosine",
+            spec=ServerlessSpec(cloud="aws", region="us-east-1")
+        )
+    return _pc
 
-    docs = res.get("documents")
-    dists = res.get("distances")
-    metas = res.get("metadatas")
+def get_vectorstore():
+    global _vs
+    if _vs is not None:
+        return _vs
+    pc = init_pinecone()
+    embeddings = get_embeddings()
+    _vs = Pinecone.from_existing_index(INDEX_NAME, embeddings)
+    return _vs
 
-    # Nếu bất kỳ cái nào None hoặc rỗng → trả [] luôn
-    if not docs or not docs[0]:
-        return []
+def upsert_chunks(docs: List[Document]):
+    vs = get_vectorstore()
+    buckets = defaultdict(list)
+    for d in docs:
+        ns = (d.metadata.get("subject") or "general").lower()
+        buckets[ns].append(d)
+    for ns, group in buckets.items():
+        vs.add_documents(group, namespace=ns)  # ✅ ghi theo namespace
+    print(f"DEBUG added {sum(len(g) for g in buckets.values())} docs vào Pinecone index {INDEX_NAME}")
+    return sum(len(g) for g in buckets.values())
 
-    if not dists or not dists[0]:
-        dists = [[0.0] * len(docs[0])]  # fallback safe
 
-    if not metas or not metas[0]:
-        metas = [[{}] * len(docs[0])]  # fallback safe
+def similarity_search(query: str, k: int = 6, where: Optional[dict] = None):
+    vs = get_vectorstore()
+    ns, filt = _split_ns(where)
+    return vs.similarity_search_with_score(query, k=k, filter=filt, namespace=ns)
 
-    return [
-        {"document": doc, "score": dist, "metadata": md}
-        for doc, dist, md in zip(docs[0], dists[0], metas[0])
-    ]
 
+def _split_ns(where: dict | None):
+    ns = None
+    if where and "subject" in where:
+        ns = str(where["subject"]).lower()
+        where = {k: v for k, v in where.items() if k != "subject"}
+    return ns, where
+
+def get_all_docs(subject: Optional[str] = None) -> List[Document]:
+    vs = get_vectorstore()
+    if subject:
+        return vs.similarity_search("dummy", k=10000, filter={"subject": subject})
+    return vs.similarity_search("dummy", k=10000)

@@ -1,64 +1,65 @@
-import os, uuid
-from fastapi import APIRouter, UploadFile, File, HTTPException, Query
-from app.services.docling_pipeline import convert_pdf_to_markdown
-from app.services.vectorstore import upsert_chunks
-from app.services.vectorstore import get_client, collection_name
+from fastapi import APIRouter, UploadFile, File, HTTPException, Form
+from ..services.docling_pipeline import parse_pdf
+from ..services.vectorstore import upsert_chunks
+import uuid, time, os
 
 router = APIRouter(prefix="/index", tags=["index"])
 
-def simple_markdown_chunk(md: str, max_chars=2000, overlap=300):
-    chunks = []
-    i = 0
-    while i < len(md):
-        j = min(i + max_chars, len(md))
-        chunk = md[i:j]
-        chunks.append(chunk)
-        if j >= len(md): break
-        i = max(0, j - overlap)
-    return [c for c in chunks if c.strip()]
+def slugify(s: str) -> str:
+    import re, unicodedata
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+    s = re.sub(r"[^a-zA-Z0-9]+", "_", s).strip("_").lower()
+    return s
 
 @router.post("/upload")
-async def upload_doc(
-    docId: str,
+async def upload(
     file: UploadFile = File(...),
-    ocr: str = Query("auto", enum=["off", "auto", "force"])
+    subject: str = Form(...),          # <-- thêm dòng này
+    course_id: str | None = Form(None) # <-- tuỳ chọn
 ):
-    try:
-        tmp_dir = "./tmp"; os.makedirs(tmp_dir, exist_ok=True)
-        local_path = os.path.join(tmp_dir, f"{uuid.uuid4()}_{file.filename}")
-        with open(local_path, "wb") as f:
-            f.write(await file.read())
+    filename = (file.filename or "uploaded.pdf")
+    if not filename.lower().endswith(".pdf"):
+        raise HTTPException(400, "Chỉ hỗ trợ PDF")
 
-        # 1) Chuẩn hoá PDF → Markdown bằng Docling
-        md = convert_pdf_to_markdown(local_path, ocr_mode=ocr, ocr_langs=["vi","en"], do_tables=True)
-        if not md.strip():
-            raise HTTPException(status_code=400, detail="Doc rỗng hoặc không đọc được.")
+    os.makedirs("tmp", exist_ok=True)
+    tmp_path = os.path.join("tmp", f"{uuid.uuid4()}_{filename}")
+    with open(tmp_path, "wb") as f:
+        f.write(await file.read())
 
-        # 2) Chunk markdown (đơn giản, ổn định). Có thể nâng cấp sang Docling HybridChunker sau.
-        chunks = simple_markdown_chunk(md, max_chars=2000, overlap=300)
+     # Nếu không có course_id → tự sinh
+    if not course_id:
+        course_id = f"{subject}_{uuid.uuid4().hex[:8]}"  # ví dụ: programming_a1b2c3d4
 
-        # 3) Lưu Vector DB (Chroma)
-        metas = [{"docId": docId, "chunk_id": i} for i in range(len(chunks))]
-        upsert_chunks(docId, chunks, metas)
+    t0 = time.time()
+    docs, meta = parse_pdf(tmp_path, subject=subject)
 
-        try: os.remove(local_path)
-        except: pass
+    # 👉 log kiểm tra số docs
+    print(f"DEBUG: parse_pdf trả về {len(docs)} docs, meta={meta}")
 
-        return {"msg": f"Indexed {len(chunks)} chunks for {docId}", "ocr": ocr}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Upload/Index failed: {e}")
+    # Gắn metadata chung
+    s_subject = slugify(subject)
+    for i, d in enumerate(docs):
+        d.metadata["subject"] = s_subject
+        d.metadata["course_id"] = course_id
+        d.metadata["source"] = filename
+        d.metadata["chunk_id"] = d.metadata.get("chunk_id", f"{filename}__{i}")
 
+    added = upsert_chunks(docs)
 
+    # 👉 log kiểm tra số docs đã add
+    # print(f"DEBUG: upsert_chunks thêm {added} docs vào Db")
 
-@router.get("/list")
-def list_chunks(docId: str, limit: int = 5):
-    client = get_client()
-    coll = client.get_or_create_collection(collection_name(docId))
-    res = coll.get(limit=limit)  # lấy vài item đầu
+    # 👉 chỉ xóa file nếu chắc chắn đã add thành công
+    if added > 0:
+        os.remove(tmp_path)
+    else:
+        print(f"⚠️ Không thêm được doc nào, giữ lại file tạm: {tmp_path}")
+
     return {
-        "count": len(res["ids"]),
-        "documents": res["documents"],
-        "metadatas": res["metadatas"],
-        "ids": res["ids"]
+        "doc_id": os.path.basename(filename),
+        "course_id": course_id,
+        "pages": meta["pages"],
+        "chunks": added,
+        "elapsed_ms": int((time.time() - t0) * 1000),
+        "warnings": [] if added > 0 else ["Không thêm được doc nào"],
     }
-

@@ -1,14 +1,19 @@
-fastapi
-uvicorn
-chromadb
-sentence-transformers
-google-cloud-storage
-firebase-admin
-pydantic
-python-multipart
-PyMuPDF          # trích xuất PDF
-sentence-transformers
-chromadb
-numpy
-docling==2.*        # core Docling
-torch               # CPU là đủ
+fastapi==0.115.*
+uvicorn[standard]==0.30.*
+
+langchain==0.3.*
+langchain-core==0.3.*
+langchain-community==0.3.*
+langchain-text-splitters==0.3.*
+
+chromadb==0.5.*
+sentence-transformers==3.*
+transformers>=4.41.0
+accelerate>=0.30.0
+
+docling==2.*
+easyocr==1.7.*
+torch==2.3.*
+torchvision==0.18.*
+
+loguru==0.7.*

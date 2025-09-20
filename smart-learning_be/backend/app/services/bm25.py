@@ -1,0 +1,34 @@
+# bm25.py
+import json, os
+from typing import List
+from langchain_community.retrievers import BM25Retriever
+from langchain_core.documents import Document
+from .vectorstore import get_all_docs
+from .config import USE_BM25
+
+CORPUS = os.path.join(os.path.dirname(__file__), "corpus.jsonl")
+# _bm25 = None  # cache
+_bm25_cache: dict[str, BM25Retriever] = {}
+
+def load_corpus() -> List[Document]:
+    docs: List[Document] = []
+    with open(CORPUS, "r", encoding="utf-8") as f:
+        for line in f:
+            item = json.loads(line)
+            txt = item.get("text") or ""
+            meta = item.get("metadata") or {}
+            docs.append(Document(page_content=txt, metadata=meta))
+    return docs
+
+
+def get_bm25_retriever(k: int = 12, subject: str | None = None) -> BM25Retriever | None:
+    if not USE_BM25:
+        return None
+    key = (subject or "__ALL__").lower()
+    if key not in _bm25_cache:
+        docs = load_corpus() if subject is None else [d for d in load_corpus() if d.metadata.get("subject") == subject]
+        if not docs:
+            raise ValueError(f"❌ Không có tài liệu cho subject={subject}")
+        _bm25_cache[key] = BM25Retriever.from_documents(docs)
+    _bm25_cache[key].k = k
+    return _bm25_cache[key]
