@@ -1,0 +1,68 @@
+Ví dụ minh họa:
+
+(1) Lịch sử
+Q: What is the Vietnam War?
+A:
+**Mở đầu:** Chiến tranh Việt Nam bắt nguồn từ Hiệp định Genève 1954.  
+**Diễn biến:** 1955–1975, Mỹ tham chiến sâu, các chiến dịch lớn.  
+**Kết thúc/Kết quả:** 30/4/1975, đất nước thống nhất.  
+**Ý nghĩa:** Thay đổi trật tự quốc tế.  
+**TL;DR:** Chiến tranh Việt Nam kết thúc 1975, thống nhất đất nước.
+
+(2) Toán
+Q: Giải x² - 5x + 6 = 0
+A:
+Δ = 25 - 24 = 1 > 0 → có 2 nghiệm: x₁=2, x₂=3.  
+**TL;DR:** Nghiệm là 2 và 3.
+
+(3) Lập trình
+Q: What is recursion in programming?
+A: Đệ quy là hàm tự gọi chính nó.  
+Ví dụ:
+```python
+def factorial(n):
+    if n==0: return 1
+    return n*factorial(n-1)
+Ứng dụng: giai thừa, duyệt cây.
+TL;DR: Đệ quy = hàm tự gọi chính nó.
+
+(4) Typo handling
+Q: intlagi
+A: Có phải bạn muốn hỏi "int là gì" không?
+int là kiểu dữ liệu số nguyên trong nhiều ngôn ngữ lập trình
+TL;DR: int = số nguyên.
+
+(5) Câu trả lời rõ ràng
+Q: float la gi
+A: Có phải bạn muốn hỏi "float là gì" không?
+float là kiểu dữ liệu số thực "trong nhiều ngôn ngữ lập trình (Python, Java, C)"... (đoạn trong nhiều ngôn 
+ngữ lập trình là rất quan trọng vì rõ ràng float không phải là dữ liệu của riêng 1 ngôn
+ngữ nào cả nên ta không nói của ngôn ngữ python, C, Java là chưa rõ ràng)
+TL;DR: int = số nguyên.
+
+(6) Bad vs Good
+Q: What is int in programming?
+❌ Bad: "Dựa trên ngữ cảnh được cung cấp, int là..."
+✅ Good: "int là kiểu dữ liệu số nguyên trong lập trình..."
+
+(7) Next questions
+{
+  "user_question": "Kiểu dữ liệu int trong Python là gì?",
+  "assistant_answer": "Kiểu dữ liệu int trong Python dùng để biểu diễn số nguyên. Nó có thể là số dương, âm hoặc 0, không có phần thập phân.\n\nVí dụ:\n```python\nx = 42\n```\nKết luận: int là kiểu dữ liệu số nguyên, dùng để lưu trữ và xử lý các giá trị nguyên.",
+  "next_questions": [
+    "Làm thế nào để chuyển đổi từ int sang float?",
+    "int() khác gì so với float()?",
+    "Có giới hạn kích thước cho số nguyên trong Python không?"
+  ]
+}
+
+(8) Next questions
+{
+  "user_question": "Hàm len() trong Python dùng để làm gì?",
+  "assistant_answer": "Hàm len() trả về độ dài (số phần tử) của một đối tượng như chuỗi, danh sách, hoặc từ điển.\n\nVí dụ:\n```python\nlen('hello')  # Kết quả: 5\n```\nKết luận: len() giúp biết nhanh kích thước của dữ liệu.",
+  "next_questions": [
+    "Có thể dùng len() với từ điển không?",
+    "len() khác gì với hàm count()?",
+    "Làm sao để duyệt qua từng ký tự trong chuỗi?"
+  ]
+}

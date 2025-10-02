@@ -1,0 +1,52 @@
+fastapi==0.115.*
+uvicorn[standard]==0.30.*
+python-dotenv
+requests
+
+# PDF
+pymupdf==1.24.*
+pymupdf4llm
+docling==2.*
+
+# Text utils
+regex
+clean-text
+
+# milvus
+pymilvus==2.4.*
+
+# ML / LLM
+numpy<2.0
+torch==2.3.0+cu121
+torchvision==0.18.0+cu121
+--extra-index-url https://download.pytorch.org/whl/cu121
+transformers>=4.41.0
+accelerate>=0.30.0
+sentence-transformers==3.*
+
+pip install nltk
+
+# LangChain
+langchain==0.3.*
+langchain-core==0.3.*
+langchain-community==0.3.*
+langchain-text-splitters==0.3.*
+
+# Vector DB (Milvus)
+pymilvus==2.5.7
+langchain-milvus==0.2.1
+protobuf==5.27.2
+
+# Google GenAI (bạn có import ChatGoogleGenerativeAI)
+langchain-google-genai==2.0.9
+google-generativeai==0.8.5
+google-ai-generativelanguage==0.6.15
+
+# Firebase (bạn có import firebase_admin)
+firebase-admin
+
+# FastAPI upload File
+python-multipart
+
+# BM25 (LangChain community BM25Retriever thường cần)
+rank-bm25
