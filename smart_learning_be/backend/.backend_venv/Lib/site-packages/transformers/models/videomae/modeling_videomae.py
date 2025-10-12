@@ -21,7 +21,6 @@ from typing import Callable, Optional
 
 import numpy as np
 import torch
-import torch.utils.checkpoint
 from torch import nn
 from torch.nn import MSELoss
 
@@ -403,6 +402,7 @@ class VideoMAEPreTrainedModel(PreTrainedModel):
     base_model_prefix = "videomae"
     main_input_name = "pixel_values"
     supports_gradient_checkpointing = True
+    _no_split_modules = ["VideoMAEEmbeddings", "VideoMAELayer"]
     _supports_sdpa = True
     _supports_flash_attn = True
     _supports_flex_attn = True

@@ -62,5 +62,23 @@ async def run_ocr(file: UploadFile = File(...)):
     text = parse_pdf(contents)
     return {"text": text}
 
+
+@app.post("/ocr_page")
+async def run_ocr_page(file: UploadFile = File(...)):
+    contents = await file.read()
+    import PIL.Image, io, numpy as np
+    img = PIL.Image.open(io.BytesIO(contents)).convert("RGB")
+    img = np.array(img)
+
+    result = paddle_ocr.ocr(img)
+    texts = []
+    if result and result != [None]:
+        for block in result:
+            if block:
+                for line in block:
+                    if line and len(line) > 1:
+                        texts.append(line[1][0])
+    return {"text": "\n".join(texts)}
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=9000)

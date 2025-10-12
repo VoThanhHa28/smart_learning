@@ -1,61 +1,76 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import Any, List
+from typing import Any, List, Optional
 from ..services.chain import retrieve_answer
+import os
+import time
 
 router = APIRouter(tags=["query"])
 
+
+# ============================= #
+# 📦 Models
+# ============================= #
 class QueryRequest(BaseModel):
     question: str
     top_k: int = 6
-    subject: str | None = None
-    course_id: str | None = None
+    subject: Optional[str] = None
+    course_id: Optional[str] = None
+
 
 class ContextChunk(BaseModel):
-    doc_id: str | None = None
-    chunk_id: str | None = None
-    page: int | None = None
+    page: Optional[int] = None
     text: str
-    score: float | None = None
-    source: str | None = None
+
 
 class QueryResponse(BaseModel):
     answer: str
-    contexts: List[ContextChunk]
+    sources: List[ContextChunk]
     elapsed_ms: int
 
+
+# ============================= #
+# 🚀 Query Endpoint
+# ============================= #
 @router.post("/query", response_model=QueryResponse)
-def query(req: QueryRequest):
-    import time
+async def query(req: QueryRequest):
     t0 = time.time()
 
-    # ép subject (bắt buộc phải có để tránh query toàn bộ)
     if not req.subject:
         raise HTTPException(status_code=400, detail="Subject is required")
-
     if not req.course_id:
         raise HTTPException(status_code=400, detail="Course ID is required")
-    # filter theo subject trong metadata
-    filters = {"subject": req.subject.lower()}
-    if req.course_id:
-        filters["course_id"] = req.course_id
-    answer, docs = retrieve_answer(req.question, k=req.top_k, filters=filters, subject=req.subject)
 
-    ctxs: List[ContextChunk] = [
-        ContextChunk(
-            doc_id=d.metadata.get("source"),
-            chunk_id=d.metadata.get("chunk_id"),
-            page=d.metadata.get("page"),
-            text=d.page_content[:1000],
-            score=d.metadata.get("score"),
-            source=d.metadata.get("source"),
-        )
-        for d in docs
-    ]
+    filters = {
+        "subject": req.subject.lower().strip(),
+        "course_id": req.course_id.lower().strip(),
+    }
 
-    return QueryResponse(
-        answer=answer,
-        contexts=ctxs,
-        elapsed_ms=int((time.time() - t0) * 1000),
+    # ✅ Gọi async RAG chain
+    answer, docs = await retrieve_answer(
+        question=req.question,
+        subject=req.subject,              # ✅ truyền rõ ràng (đừng để trong filters)
+        course_id=req.course_id,          # ✅ thêm dòng này
+        k=req.top_k,
+        filters=filters,
     )
 
+    # ✅ Chuẩn hóa metadata cho client
+    sources: List[ContextChunk] = []
+    for d in docs:
+        meta = d.metadata
+        sources.append(
+            ContextChunk(
+                page=meta.get("page"),          
+                text=d.page_content[:1000] + "...",  # chỉ preview 1000 ký tự
+            )
+        )
+
+    elapsed = int((time.time() - t0) * 1000)
+
+    # ✅ Giữ nguyên Markdown + newline (không JSON encode thêm lần nữa)
+    return QueryResponse(
+        answer=answer,
+        sources=sources,
+        elapsed_ms=elapsed,
+    )

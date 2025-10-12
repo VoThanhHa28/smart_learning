@@ -1,6 +1,8 @@
 # Thư mục môi trường ảo
 .venv/
 venv/
+.backend_venv/
+.ocr_venv/
 
 # Cache Python
 __pycache__/
@@ -10,3 +12,6 @@ __pycache__/
 *.dll
 *.lib
 *.pyd
+*.pyo
+
+volumes/

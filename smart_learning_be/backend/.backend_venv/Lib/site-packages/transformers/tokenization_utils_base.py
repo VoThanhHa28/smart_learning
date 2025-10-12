@@ -87,9 +87,22 @@ def import_protobuf_decode_error(error_message=""):
         raise ImportError(PROTOBUF_IMPORT_ERROR.format(error_message))
 
 
+def flatten(arr: list):
+    res = []
+    if len(arr) > 0:
+        for sub_arr in arr:
+            if isinstance(arr[0], (list, tuple)):
+                res.extend(flatten(sub_arr))
+            else:
+                res.append(sub_arr)
+    return res
+
+
+if is_tokenizers_available() or TYPE_CHECKING:
+    from tokenizers import Encoding as EncodingFast
+
 if is_tokenizers_available():
     from tokenizers import AddedToken
-    from tokenizers import Encoding as EncodingFast
 else:
 
     @dataclass(frozen=False, eq=True)
@@ -118,12 +131,6 @@ else:
         def __str__(self):
             return self.content
 
-    @dataclass
-    class EncodingFast:
-        """This is dummy class because without the `tokenizers` library we don't have these objects anyway"""
-
-        pass
-
 
 logger = logging.get_logger(__name__)
 
@@ -139,7 +146,7 @@ PreTokenizedInputPair = tuple[list[str], list[str]]
 EncodedInputPair = tuple[list[int], list[int]]
 
 # Define type aliases for text-related non-text modalities
-AudioInput = Union["np.ndarray", "torch.Tensor", list["np.ndarray"], list["torch.Tensor"]]
+AudioInput = Union[np.ndarray, "torch.Tensor", list[np.ndarray], list["torch.Tensor"]]
 
 # Slow tokenizers used to be saved in three separated files
 SPECIAL_TOKENS_MAP_FILE = "special_tokens_map.json"
@@ -227,7 +234,8 @@ class BatchEncoding(UserDict):
     ):
         super().__init__(data)
 
-        if isinstance(encoding, EncodingFast):
+        # If encoding is not None, the fast tokenization is used
+        if encoding is not None and isinstance(encoding, EncodingFast):
             encoding = [encoding]
 
         self._encodings = encoding
@@ -714,26 +722,37 @@ class BatchEncoding(UserDict):
                 )
             import tensorflow as tf
 
-            as_tensor = tf.constant
+            def as_tensor(value, dtype=None):
+                if len(flatten(value)) == 0 and dtype is None:
+                    dtype = tf.int32
+                return tf.constant(value, dtype=dtype)
+
             is_tensor = tf.is_tensor
+
         elif tensor_type == TensorType.PYTORCH:
             if not is_torch_available():
                 raise ImportError("Unable to convert output to PyTorch tensors format, PyTorch is not installed.")
             import torch
 
-            is_tensor = torch.is_tensor
-
             def as_tensor(value, dtype=None):
-                if isinstance(value, list) and isinstance(value[0], np.ndarray):
+                if isinstance(value, list) and len(value) > 0 and isinstance(value[0], np.ndarray):
                     return torch.from_numpy(np.array(value))
-                return torch.tensor(value)
+                if len(flatten(value)) == 0 and dtype is None:
+                    dtype = torch.int64
+                return torch.tensor(value, dtype=dtype)
+
+            is_tensor = torch.is_tensor
 
         elif tensor_type == TensorType.JAX:
             if not is_flax_available():
                 raise ImportError("Unable to convert output to JAX tensors format, JAX is not installed.")
             import jax.numpy as jnp  # noqa: F811
 
-            as_tensor = jnp.array
+            def as_tensor(value, dtype=None):
+                if len(flatten(value)) == 0 and dtype is None:
+                    dtype = jnp.int32
+                return jnp.array(value, dtype=dtype)
+
             is_tensor = is_jax_tensor
 
         elif tensor_type == TensorType.MLX:
@@ -741,18 +760,27 @@ class BatchEncoding(UserDict):
                 raise ImportError("Unable to convert output to MLX tensors format, MLX is not installed.")
             import mlx.core as mx
 
-            as_tensor = mx.array
+            def as_tensor(value, dtype=None):
+                if len(flatten(value)) == 0 and dtype is None:
+                    dtype = mx.int32
+                return mx.array(value, dtype=dtype)
 
             def is_tensor(obj):
                 return isinstance(obj, mx.array)
         else:
 
             def as_tensor(value, dtype=None):
-                if isinstance(value, (list, tuple)) and isinstance(value[0], (list, tuple, np.ndarray)):
+                if (
+                    isinstance(value, (list, tuple))
+                    and len(value) > 0
+                    and isinstance(value[0], (list, tuple, np.ndarray))
+                ):
                     value_lens = [len(val) for val in value]
                     if len(set(value_lens)) > 1 and dtype is None:
                         # we have a ragged list so handle explicitly
                         value = as_tensor([np.asarray(val) for val in value], dtype=object)
+                if len(flatten(value)) == 0 and dtype is None:
+                    dtype = np.int64
                 return np.asarray(value, dtype=dtype)
 
             is_tensor = is_numpy_array
@@ -1545,14 +1573,12 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
                 A list of tools (callable functions) that will be accessible to the model. If the template does not
                 support function calling, this argument will have no effect. Each tool should be passed as a JSON Schema,
                 giving the name, description and argument types for the tool. See our
-                [chat templating guide](https://huggingface.co/docs/transformers/main/en/chat_templating#automated-function-conversion-for-tool-use)
+                [tool use guide](https://huggingface.co/docs/transformers/en/chat_extras#passing-tools)
                 for more information.
             documents (`list[dict[str, str]]`, *optional*):
                 A list of dicts representing documents that will be accessible to the model if it is performing RAG
                 (retrieval-augmented generation). If the template does not support RAG, this argument will have no
-                effect. We recommend that each document should be a dict containing "title" and "text" keys. Please
-                see the RAG section of the [chat templating guide](https://huggingface.co/docs/transformers/main/en/chat_templating#arguments-for-RAG)
-                for examples of passing documents with chat templates.
+                effect. We recommend that each document should be a dict containing "title" and "text" keys.
             chat_template (`str`, *optional*):
                 A Jinja template to use for this conversion. It is usually not necessary to pass anything to this
                 argument, as the model's template will be used by default.
@@ -2014,6 +2040,7 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
                             local_files_only=local_files_only,
                             revision=revision,
                             cache_dir=cache_dir,
+                            token=token,
                         ):
                             template = template.removesuffix(".jinja")
                             vocab_files[f"chat_template_{template}"] = f"{CHAT_TEMPLATE_DIR}/{template}.jinja"
@@ -2149,7 +2176,7 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
             if template_file is None:
                 continue  # I think this should never happen, but just in case
             template_name = extra_chat_template.removeprefix("chat_template_")
-            with open(template_file) as chat_template_handle:
+            with open(template_file, encoding="utf8") as chat_template_handle:
                 chat_templates[template_name] = chat_template_handle.read()
         if len(chat_templates) == 1 and "default" in chat_templates:
             init_kwargs["chat_template"] = chat_templates["default"]
@@ -2429,7 +2456,7 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
         filename_prefix: Optional[str] = None,
         push_to_hub: bool = False,
         **kwargs,
-    ) -> tuple[str]:
+    ) -> tuple[str, ...]:
         """
         Save the full tokenizer state.
 
@@ -2594,10 +2621,10 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
     def _save_pretrained(
         self,
         save_directory: Union[str, os.PathLike],
-        file_names: tuple[str],
+        file_names: tuple[str, ...],
         legacy_format: Optional[bool] = None,
         filename_prefix: Optional[str] = None,
-    ) -> tuple[str]:
+    ) -> tuple[str, ...]:
         """
         Save a tokenizer using the slow-tokenizer/legacy format: vocabulary + added tokens.
 
@@ -2626,7 +2653,7 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
 
         return file_names + vocab_files + (added_tokens_file,)
 
-    def save_vocabulary(self, save_directory: str, filename_prefix: Optional[str] = None) -> tuple[str]:
+    def save_vocabulary(self, save_directory: str, filename_prefix: Optional[str] = None) -> tuple[str, ...]:
         """
         Save only the vocabulary of the tokenizer (vocabulary + added tokens).
 
@@ -2640,7 +2667,7 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
                 An optional prefix to add to the named of the saved files.
 
         Returns:
-            `Tuple(str)`: Paths to the files saved.
+            `tuple(str)`: Paths to the files saved.
         """
         raise NotImplementedError
 
@@ -3866,7 +3893,7 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
 
     def decode(
         self,
-        token_ids: Union[int, list[int], "np.ndarray", "torch.Tensor", "tf.Tensor"],
+        token_ids: Union[int, list[int], np.ndarray, "torch.Tensor"],
         skip_special_tokens: bool = False,
         clean_up_tokenization_spaces: Optional[bool] = None,
         **kwargs,

@@ -26,7 +26,9 @@ def get_bm25_retriever(k: int = 12, subject: str | None = None) -> BM25Retriever
         return None
     key = (subject or "__ALL__").lower()
     if key not in _bm25_cache:
-        docs = load_corpus() if subject is None else [d for d in load_corpus() if d.metadata.get("subject") == subject]
+        docs = load_corpus() if subject is None else [
+            d for d in load_corpus() if d.metadata.get("subject", "").lower() == (subject or "").lower()
+        ]
         if not docs:
             raise ValueError(f"❌ Không có tài liệu cho subject={subject}")
         _bm25_cache[key] = BM25Retriever.from_documents(docs)

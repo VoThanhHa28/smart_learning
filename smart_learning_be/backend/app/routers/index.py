@@ -1,6 +1,5 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException, Form
-from ..services.docling_pipeline import fast_parse_pdf
-from ..services.vectorstore import upsert_chunks
+from ..services.ingestion import ingest_file, ingest_many
 import uuid, time, os
 
 router = APIRouter(prefix="/index", tags=["index"])
@@ -11,56 +10,73 @@ def slugify(s: str) -> str:
     s = re.sub(r"[^a-zA-Z0-9]+", "_", s).strip("_").lower()
     return s
 
+
 @router.post("/upload")
-async def upload(
-    file: UploadFile = File(...),
-    subject: str = Form(...),          # <-- thêm dòng này
-    course_id: str | None = Form(None) # <-- tuỳ chọn
-):
+async def upload(file: UploadFile = File(...), subject: str = Form(...), course_id: str | None = Form(None)):
     filename = (file.filename or "uploaded.pdf")
-    if not filename.lower().endswith(".pdf"):
-        raise HTTPException(400, "Chỉ hỗ trợ PDF")
+    if not filename.lower().endswith((".pdf", ".docx", ".pptx", ".html")):
+        raise HTTPException(400, "Chỉ hỗ trợ PDF/DOCX/PPTX/HTML")
 
     os.makedirs("tmp", exist_ok=True)
     tmp_path = os.path.join("tmp", f"{uuid.uuid4()}_{filename}")
     with open(tmp_path, "wb") as f:
         f.write(await file.read())
 
-     # Nếu không có course_id → tự sinh
     if not course_id:
-        course_id = f"{subject}_{uuid.uuid4().hex[:8]}"  # ví dụ: programming_a1b2c3d4
+        course_id = f"{slugify(subject)}_{uuid.uuid4().hex[:8]}"
 
     t0 = time.time()
-    docs, meta = fast_parse_pdf(tmp_path, subject=subject, course_id=course_id)
+    result = await ingest_file(tmp_path, course_id, subject)
 
-
-    # 👉 log kiểm tra số docs
-    print(f"DEBUG: fast_parse_pdf trả về {len(docs)} docs, meta={meta}")
-
-    # Gắn metadata chung
-    s_subject = slugify(subject)
-    for i, d in enumerate(docs):
-        d.metadata["subject"] = s_subject
-        d.metadata["course_id"] = course_id
-        d.metadata["source"] = filename
-        d.metadata["chunk_id"] = d.metadata.get("chunk_id", f"{filename}__{i}")
-
-    added = upsert_chunks(docs)
-
-    # 👉 log kiểm tra số docs đã add
-    # print(f"DEBUG: upsert_chunks thêm {added} docs vào Db")
-
-    # 👉 chỉ xóa file nếu chắc chắn đã add thành công
-    if added > 0:
+    try:
         os.remove(tmp_path)
-    else:
-        print(f"⚠️ Không thêm được doc nào, giữ lại file tạm: {tmp_path}")
+    except Exception as e:
+        print(f"⚠️ Cleanup skipped: {e}")
+
+    print(f"✅ [INDEX] Uploaded {filename}, subject={subject}, course={course_id}, chunks={result['chunks_indexed']}")
 
     return {
-        "doc_id": os.path.basename(filename),
+        "doc_id": filename,
         "course_id": course_id,
-        "pages": meta["pages"],
-        "chunks": added,
+        "subject": subject,
+        "chunks": result["chunks_indexed"],
         "elapsed_ms": int((time.time() - t0) * 1000),
-        "warnings": [] if added > 0 else ["Không thêm được doc nào"],
+        "enrichment_file": result["enrichment_file"]
+    }
+
+
+@router.post("/upload_batch")
+async def upload_batch(files: list[UploadFile] = File(...), subject: str = Form(...), course_id: str | None = Form(None)):
+    if not course_id:
+        course_id = f"{slugify(subject)}_{uuid.uuid4().hex[:8]}"
+
+    os.makedirs("tmp", exist_ok=True)
+    tmp_paths = []
+    for f in files:
+        filename = f.filename or "uploaded"
+        tmp_path = os.path.join("tmp", f"{uuid.uuid4()}_{filename}")
+        with open(tmp_path, "wb") as out:
+            out.write(await f.read())
+        tmp_paths.append(tmp_path)
+
+    t0 = time.time()
+    results = await ingest_many(tmp_paths, course_id, subject)
+
+    try:
+        for p in tmp_paths:
+            if os.path.exists(p):
+                os.remove(p)
+    except Exception as e:
+        print(f"⚠️ Cleanup skipped: {e}")
+
+    total_chunks = sum(r["chunks_indexed"] for r in results)
+    print(f"✅ [INDEX-BATCH] Uploaded {len(files)} files, subject={subject}, total_chunks={total_chunks}")
+
+    return {
+        "course_id": course_id,
+        "subject": subject,
+        "files": len(files),
+        "results": results,
+        "total_chunks": total_chunks,
+        "elapsed_ms": int((time.time() - t0) * 1000)
     }

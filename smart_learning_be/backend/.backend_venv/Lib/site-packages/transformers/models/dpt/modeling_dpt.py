@@ -24,7 +24,6 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 import torch
-import torch.utils.checkpoint
 from torch import nn
 from torch.nn import CrossEntropyLoss
 
@@ -880,7 +879,7 @@ class DPTNeck(nn.Module):
         self.config = config
 
         # postprocessing: only required in case of a non-hierarchical backbone (e.g. ViT, BEiT)
-        if config.backbone_config is not None and config.backbone_config.model_type in ["swinv2"]:
+        if config.backbone_config is not None and config.backbone_config.model_type == "swinv2":
             self.reassemble_stage = None
         else:
             self.reassemble_stage = DPTReassembleStage(config)

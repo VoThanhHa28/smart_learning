@@ -46,7 +46,6 @@ from .utils import (
     is_remote_url,
     is_torch_available,
     is_torchcodec_available,
-    is_torchvision_available,
     is_torchvision_v2_available,
     logging,
 )
@@ -68,11 +67,9 @@ from .video_utils import (
 if is_torch_available():
     import torch
 
-if is_torchvision_available():
-    if is_torchvision_v2_available():
-        from torchvision.transforms.v2 import functional as F
-    else:
-        from torchvision.transforms import functional as F
+if is_torchvision_v2_available():
+    from torchvision.transforms.v2 import functional as F
+
 
 logger = logging.get_logger(__name__)
 
@@ -95,8 +92,6 @@ BASE_VIDEO_PROCESSOR_DOCSTRING = r"""
         do_center_crop (`bool`, *optional*, defaults to `self.do_center_crop`):
             Whether to center crop the video to the specified `crop_size`. Can be overridden by `do_center_crop` in the
             `preprocess` method.
-        do_pad (`bool`, *optional*):
-            Whether to pad the video to the `(max_height, max_width)` of the videos in the batch.
         crop_size (`dict[str, int]` *optional*, defaults to `self.crop_size`):
             Size of the output video after applying `center_crop`. Can be overridden by `crop_size` in the `preprocess`
             method.
@@ -164,7 +159,6 @@ class BaseVideoProcessor(BaseImageProcessorFast):
     crop_size = None
     do_resize = None
     do_center_crop = None
-    do_pad = None
     do_rescale = None
     rescale_factor = 1 / 255
     do_normalize = None
@@ -401,12 +395,10 @@ class BaseVideoProcessor(BaseImageProcessorFast):
         do_convert_rgb: bool,
         do_resize: bool,
         size: SizeDict,
-        size_divisor: Optional[int],
         interpolation: Optional["F.InterpolationMode"],
         do_center_crop: bool,
         crop_size: SizeDict,
         do_rescale: bool,
-        do_pad: bool,
         rescale_factor: float,
         do_normalize: bool,
         image_mean: Optional[Union[float, list[float]]],
@@ -421,9 +413,7 @@ class BaseVideoProcessor(BaseImageProcessorFast):
             if do_convert_rgb:
                 stacked_videos = self.convert_to_rgb(stacked_videos)
             if do_resize:
-                stacked_videos = self.resize(
-                    stacked_videos, size=size, size_divisor=size_divisor, interpolation=interpolation
-                )
+                stacked_videos = self.resize(stacked_videos, size=size, interpolation=interpolation)
             resized_videos_grouped[shape] = stacked_videos
         resized_videos = reorder_videos(resized_videos_grouped, grouped_videos_index)
 
@@ -681,7 +671,7 @@ class BaseVideoProcessor(BaseImageProcessorFast):
         else:
             video_processor_file = VIDEO_PROCESSOR_NAME
             try:
-                # Try to load with a new config name first and if not successfull try with the old file name
+                # Try to load with a new config name first and if not successful try with the old file name
                 # NOTE: we will gradually change to saving all processor configs as nested dict in PROCESSOR_NAME
                 resolved_video_processor_files = [
                     resolved_file
@@ -705,8 +695,8 @@ class BaseVideoProcessor(BaseImageProcessorFast):
                     is not None
                 ]
                 resolved_video_processor_file = resolved_video_processor_files[0]
-            except EnvironmentError:
-                # Raise any environment error raise by `cached_file`. It will have a helpful error message adapted to
+            except OSError:
+                # Raise any OS error raise by `cached_file`. It will have a helpful error message adapted to
                 # the original exception.
                 raise
             except Exception:
