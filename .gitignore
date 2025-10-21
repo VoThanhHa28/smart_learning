@@ -15,3 +15,69 @@ __pycache__/
 *.pyo
 
 volumes/
+
+# ==== Python env & bytecode ====
+.venv/
+venv/
+.backend_venv/
+.ocr_venv/
+__pycache__/
+*.py[cod]
+
+# ==== Secrets & env ====
+.env
+*.env
+firebase_key.json
+*.pem
+*.key
+*.p12
+*.crt
+
+# ==== Build / temp / logs ====
+dist/
+build/
+tmp/
+temp/
+cache/
+logs/
+*.log
+
+# ==== Data / uploads (không version hoá) ====
+data/
+datasets/
+uploads/
+storage/
+media/
+results/
+volumes/
+
+# ==== HuggingFace / models / checkpoints ====
+smart_learning_be/backend/.cache/
+.cache/
+hf_cache/
+huggingface/
+**/huggingface/**
+**/models--*/
+**/snapshots/**
+**/refs/**
+**/transformers_modules/**
+*.safetensors
+*.bin
+*.pt
+*.ckpt
+*.onnx
+*.tflite
+
+# ==== Vector DB / local services ====
+milvus/
+**/milvus/**
+.db
+*.sqlite
+*.sqlite3
+
+# ==== Notebooks caches ====
+.ipynb_checkpoints/
+
+# ==== Docker noise ====
+*.pid
+*.seed
