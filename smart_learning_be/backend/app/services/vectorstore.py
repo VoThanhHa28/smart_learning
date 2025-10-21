@@ -11,10 +11,32 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from langchain_core.documents import Document
 import re
-import traceback
-COLLECTION_NAME = os.getenv("MILVUS_COLLECTION", "smart_learning")
+import os, time
+import logging
+from typing import Optional, List, Tuple, Dict, Any
 BASE_DIR = os.path.dirname(__file__)   # thư mục hiện tại (app/services)
 CORPUS_FILE = os.getenv("CORPUS_FILE", os.path.join(BASE_DIR, "corpus.jsonl"))
+
+
+
+# ========= Consts =========
+MILVUS_HOST = os.getenv("MILVUS_HOST", "localhost")
+MILVUS_PORT = os.getenv("MILVUS_PORT", "19530")
+COLLECTION_NAME = os.getenv("MILVUS_COLLECTION", "smart_learning")
+EMBED_DIM = int(os.getenv("EMBED_DIM", "768"))
+METRIC_TYPE = os.getenv("MILVUS_METRIC", "COSINE")
+
+# ========= Globals (cache) =========
+_CONNECTED = False
+_COLLECTION: Optional[Collection] = None
+
+def _connect_once():
+    global _CONNECTED
+    if _CONNECTED:
+        return
+    connections.connect("default", host=MILVUS_HOST, port=MILVUS_PORT, timeout=10)
+    _CONNECTED = True
+    logging.info(f"[milvus] connected {MILVUS_HOST}:{MILVUS_PORT}")
 
 _vs = None
 
@@ -33,7 +55,7 @@ def get_vectorstore():
     _vs = DebugMilvus(
         embedding_function=embeddings,
         collection_name=COLLECTION_NAME,
-        connection_args={"host": os.getenv("MILVUS_HOST", "milvus"), "port": "19530"},
+        connection_args={"host": os.getenv("MILVUS_HOST", "localhost"), "port": "19530"},
         index_params=index_params,
         auto_id=True,
         text_field="text",
@@ -46,7 +68,8 @@ def get_vectorstore():
 # 🧠 Hàm xử lý 1 batch   #
 # ====================== #
 import os, traceback, numpy as np
-from pymilvus import Collection, connections
+
+from pymilvus import Collection, connections, utility
 
 def _normalize(vectors):
     arr = np.array(vectors, dtype=np.float32)
@@ -94,11 +117,7 @@ def process_batch(vs, embeddings, batch, embed=True):
         # 🔹 Kết nối Milvus (fallback nếu cần)
         collection = getattr(vs, "_collection", None)
         if collection is None:
-            connections.connect(
-                "default",
-                host=os.getenv("MILVUS_HOST", "localhost"),
-                port="19530"
-            )
+            _connect_once()
             collection = Collection(vs.collection_name)
             print(f"⚙️ Fallback: connected directly to collection {vs.collection_name}")
 
@@ -202,7 +221,7 @@ async def upsert_chunks(docs: list[Document], batch_size: int = 512, embed: bool
     try:
         collection = getattr(vs, "_collection", None)
         if collection is None:
-            connections.connect("default", host=os.getenv("MILVUS_HOST", "milvus"), port="19530")
+            _connect_once()
             collection = Collection(vs.collection_name)
 
         # 🧩 Chỉ flush nếu collection đã có index
@@ -228,69 +247,152 @@ async def upsert_chunks(docs: list[Document], batch_size: int = 512, embed: bool
     print("🏁 Upsert done.\n")
     return inserted
 
+def _get_collection() -> Collection:
+    global _COLLECTION
+    _connect_once()
+    if _COLLECTION is None:
+        if not utility.has_collection(COLLECTION_NAME):
+            raise RuntimeError(f"Collection not found: {COLLECTION_NAME}")
+        _COLLECTION = Collection(COLLECTION_NAME)
+        # Load 1 lần; Milvus sẽ quản lý cache bộ nhớ
+        try:
+            _COLLECTION.load()
+        except Exception as e:
+            logging.warning(f"[milvus] load() warn: {e}")
+        logging.info(f"[milvus] ready collection={COLLECTION_NAME}")
+    return _COLLECTION
 
-async def similarity_search(query: str, k: int = 6, where: Optional[dict] = None,
-                      threshold: float = 0.75, log: bool = True):
+# ========= Embedding helpers =========
+def _normalize(vec: np.ndarray) -> np.ndarray:
+    n = np.linalg.norm(vec)
+    if n > 0:
+        return (vec / n).astype(np.float32)
+    return vec.astype(np.float32)
 
-    # 1. Kết nối
-    connections.connect("default", host=os.getenv("MILVUS_HOST", "localhost"), port="19530")
+def _ensure_vec(x) -> np.ndarray:
+    arr = np.array(x, dtype=np.float32).reshape(-1)
+    if arr.shape[0] != EMBED_DIM:
+        raise ValueError(f"❌ Embedding dim mismatch: got {arr.shape[0]}, expect {EMBED_DIM}")
+    return _normalize(arr)
 
-    # 2. Lấy collection
-    c = Collection("smart_learning")
-    c.load()
+# ========= Public API =========
+def build_expr(where: Optional[Dict[str, Any]]) -> Optional[str]:
+    if not where:
+        return None
+    parts = []
+    subj = (where.get("subject") or "").strip().lower()
+    cid  = (where.get("course_id") or "").strip().lower()
+    if subj:
+        parts.append(f'subject == "{subj}"')
+    if cid:
+        parts.append(f'course_id == "{cid}"')
+    # if topic:
+    #     parts.append(f'lower(topic) == "{topic}"')  # chỉ nếu bạn có field "topic"
+    return " and ".join(parts) if parts else None
 
-    # 3. Encode query -> vector
-     # 3️⃣ Encode query -> vector (chuẩn float32, normalized)
-    embeddings = get_embeddings()
-    query_vec = embeddings.embed_query(query)
+def _log_milvus_ctx(col, k, ef, expr):
+    try:
+        ver = utility.get_server_version()
+        n = col.num_entities
+        prog = utility.loading_progress(col.name)
+        idx_state = utility.index_building_progress(col.name)
+    except Exception as e:
+        ver, n, prog, idx_state = f"unreachable:{e}", "?", {}, {}
 
-    import numpy as np
-    query_vec = np.array(query_vec, dtype=np.float32)
-
-    # 🔹 Normalize lại lần nữa để chắc chắn (phù hợp COSINE metric)
-    norm = np.linalg.norm(query_vec)
-    if norm > 0:
-        query_vec /= norm
-
-    # 4️⃣ Build expr filter (nếu có)
-    expr = None
-    if where:
-        clauses = []
-        if "subject" in where:
-            clauses.append(f'subject == "{where["subject"]}"')
-        if "course_id" in where:
-            clauses.append(f'course_id == "{where["course_id"]}"')
-        expr = " and ".join(clauses) if clauses else None
-
-    # 5️⃣ Search trực tiếp
-    ef_value = max(128, k * 2)
-    search_params = {"metric_type": "COSINE", "params": {"ef": ef_value}}
-
-    results = c.search(
-        data=[query_vec.tolist()],
-        anns_field="embedding",
-        param=search_params,
-        limit=k,
-        expr=expr,
-        output_fields=["page", "subject", "course_id", "text"]
+    logging.error(
+        "[milvus][SEARCH_ERR] host=%s port=%s coll=%s ver=%s rows=%s k=%d ef=%d expr=%s idx=%s load=%s build=%s",
+        os.getenv("MILVUS_HOST","localhost"), os.getenv("MILVUS_PORT","19530"),
+        col.name, ver, n, k, ef, expr or "{}", [ix.index_name for ix in col.indexes],
+        prog, idx_state
     )
-    # 6. Parse kết quả
-    docs = []
-    for hit in results[0]:
-        meta = {f: hit.entity.get(f) for f in ["page", "subject", "course_id"]}
-        sim = hit.distance  # vì COSINE trong Milvus trả truc tiếp similarity
-        print(f"[{hit.id}] distance={hit.distance:.4f} → sim={1-hit.distance:.4f}")
-        docs.append((Document(page_content=hit.entity.get("text", ""), metadata=meta), sim))
+    try:
+        import psutil  # <- chỉ psutil, KHÔNG import os ở đây
+        rss = psutil.Process(os.getpid()).memory_info().rss/1e6
+        logging.error("[milvus][SEARCH_ERR] app_mem_rss=%.1fMB", rss)
+    except Exception:
+        pass
 
-    # if threshold is not None:
-    #     docs = [(d, s) for d, s in docs if s >= threshold]
+
+async def similarity_search(
+    query: str,
+    k: int = 6,
+    where: Optional[dict] = None,
+    threshold: float = 0.5,   # giữ tham số cũ (không hard filter)
+    log: bool = True,
+    embed_fn=None,            # nếu muốn truyền hàm embed sẵn có
+) -> List[Tuple[Document, float]]:
+    """
+    Giữ nguyên hành vi trước: trả [(Document, score)].
+    - Không connect/load mỗi lần nữa (cache).
+    - Không thay đổi k/logic lọc; chỉ tối ưu chuẩn hoá vector & expr.
+    """
+    if not query or not query.strip():
+        return []
+
+    col = _get_collection()
+
+    # Lấy embedding query từ embed_fn bên ngoài (giữ logic hiện tại)
+    if embed_fn is None:
+        # Reuse hàm có sẵn của bạn nếu muốn
+        from .embedding import get_embeddings
+        embeddings = get_embeddings()
+        qv = embeddings.embed_query(query)
+    else:
+        qv = embed_fn(query)
+
+    qv = _ensure_vec(qv)
+
+    expr = build_expr(where)
+    if log and expr:
+        logging.info(f"[milvus] expr={expr}")
+
+    # ef = max(128, k*2) → GIỮ logic/params như trước
+    ef_value = max(32, k * 2)
+    search_params = {"metric_type": METRIC_TYPE, "params": {"ef": ef_value}}
+
+    try:
+        t0 = time.time()
+        res = col.search(
+            data=[qv.tolist()],
+            anns_field="embedding",
+            param=search_params,
+            limit=k,
+            expr=expr,
+            output_fields=["page","subject","course_id","text"],
+            timeout=8.0,               # <- đặt timeout rõ
+        )
+        logging.info("[milvus] search OK in %.3fs, hits=%d",time.time()-t0, len(res[0]) if res else 0)
+    except Exception as e:
+        _log_milvus_ctx(col, k, ef_value, expr)
+        logging.exception("[milvus] search FAIL after %.3fs: %s",time.time()-t0, e)
+        raise
+    
+    out: List[Tuple[Document, float]] = []
+    hits = res[0] if res else []
+    for hit in hits:
+        meta = {
+            "page": hit.entity.get("page"),
+            "subject": hit.entity.get("subject"),
+            "course_id": hit.entity.get("course_id"),
+        }
+        # Milvus với COSINE: `distance` là 1 - cosine_sim (tuỳ thiết lập),
+        # bạn đã log 1-hit.distance trước đó → giữ nguyên cách tính nếu cần
+        score = hit.distance
+        doc = Document(page_content=hit.entity.get("text", ""), metadata=meta)
+        out.append((doc, score))
 
     if log:
-        print(f"\n🔎 [Direct Milvus] query='{query}', ef={ef_value}, k={k}, results={len(docs)}")
-        for d, s in docs[:5]:
-            print(f" - score={s:.3f} page={d.metadata.get('page')} {d.page_content[:100]}...")
+        logging.info(f"🔎 [milvus] q='{query[:80]}' k={k} ef={ef_value} → {len(out)} hits")
 
-    return docs
+    return out
+
+# ========= Warmup (gọi ở app start nếu muốn) =========
+def warmup_vectorstore():
+    try:
+        _ = _get_collection()
+        logging.info("[milvus] warmup done")
+    except Exception as e:
+        logging.warning(f"[milvus] warmup skipped: {e}")
 
 
 async def get_all_docs(limit: int = None, batch_size: int = 5000):

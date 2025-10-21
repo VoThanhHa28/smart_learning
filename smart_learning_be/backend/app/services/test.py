@@ -1,13 +1,4 @@
-from pymilvus import connections, Collection
-
-# Kết nối trước
-connections.connect("default", host="localhost", port="19530")
-c = Collection("smart_learning")
-res = c.search(
-    data=[[0.1]*1024],
-    anns_field="embedding",
-    param={"ef": 128},
-    limit=12,
-    expr=None
-)
-print(res)
+from app.services.meta_responder import search_meta
+print(search_meta("bạn là ai"))
+print(search_meta("cảm ơn bạn"))
+print(search_meta("bye bye"))

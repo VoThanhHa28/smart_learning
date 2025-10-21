@@ -1,22 +1,21 @@
-from pymilvus import connections, utility, FieldSchema, CollectionSchema, DataType, Collection
-from pymilvus import utility
+from pymilvus import connections, utility, Collection, FieldSchema, CollectionSchema, DataType
 import os
-COLLECTION_NAME = "smart_learning"
+
+MILVUS_HOST = os.getenv("MILVUS_HOST", "localhost")
+MILVUS_PORT = os.getenv("MILVUS_PORT", "19530")
+COLLECTION_NAME = os.getenv("MILVUS_COLLECTION", "smart_learning")
 
 def reset_collection():
-    # 1️⃣ Kết nối Milvus
-    connections.connect("default", host=os.getenv("MILVUS_HOST", "localhost"), port="19530")
-
-
-    # 2️⃣ Drop collection cũ (nếu có)
+    connections.connect("default", host=MILVUS_HOST, port=MILVUS_PORT)
     if utility.has_collection(COLLECTION_NAME):
+        try:
+            Collection(COLLECTION_NAME).release()
+        except Exception:
+            pass
         utility.drop_collection(COLLECTION_NAME)
         print(f"✅ Dropped old collection: {COLLECTION_NAME}")
-        connections.disconnect("default")
-        connections.connect("default", host="localhost", port="19530")
     else:
         print(f"ℹ️ Collection {COLLECTION_NAME} not found, nothing to drop.")
-    # 3️⃣ Định nghĩa schema mới (chuẩn cho RAG)
     fields = [
         FieldSchema(name="id", dtype=DataType.VARCHAR, max_length=64, is_primary=True, auto_id=True),
         FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=768),  # dim phải khớp model 
@@ -47,7 +46,7 @@ def reset_collection():
 
     print("⚙️ Index building in background...")
 
-    utility.wait_for_index_building_complete("smart_learning", "embedding_hnsw")
+    utility.wait_for_index_building_complete(COLLECTION_NAME, "embedding_hnsw")
     print("✅ Index build completed!")
     collection.flush()
     print("✅ Index created (HNSW)")

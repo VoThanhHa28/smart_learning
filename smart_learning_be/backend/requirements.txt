@@ -54,3 +54,4 @@ firebase-admin
 # --- BM25 (sparse retriever) ---
 rank-bm25
 hf_transfer
+tiktoken

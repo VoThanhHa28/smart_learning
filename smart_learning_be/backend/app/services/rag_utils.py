@@ -4,20 +4,16 @@ import json
 import logging
 from langchain_core.documents import Document
 from typing import List
+from tiktoken import get_encoding
 
 def build_context(docs: List[Document], limit_chars: int = 5000) -> str:
-    """
-    Ghép context từ danh sách Document, có bổ sung metadata enrichment
-    - Giữ heading, page, content_type, semantic_tags, section_position
-    - Tự động cắt theo limit_chars (soft truncation)
-    - Ưu tiên đoạn heading_level thấp hơn (tức là cấp cao, tổng quan)
-    """
     if not docs:
         return "Không có ngữ cảnh nào được tìm thấy."
 
-    # ✅ Hàm sort an toàn — tránh None hoặc string lỗi
     def safe_sort_key(d):
         meta = d.metadata or {}
+        rr = float(meta.get("rerank_score", 0.0))
+        sr = float(meta.get("semantic_score", 0.0))  # nếu sau này bạn dùng fallback light
         lvl = meta.get("heading_level")
         pg = meta.get("page")
         try:
@@ -25,10 +21,9 @@ def build_context(docs: List[Document], limit_chars: int = 5000) -> str:
         except (TypeError, ValueError):
             lvl_num = 99
         pg_num = pg if isinstance(pg, int) else 9999
-        return (lvl_num, pg_num)
+        return (-rr, -sr, lvl_num, pg_num)
 
     sorted_docs = sorted(docs, key=safe_sort_key)
-
     # Optional: debug nếu thiếu heading_level
     for d in docs:
         if d.metadata.get("heading_level") is None:
@@ -63,6 +58,12 @@ def build_context(docs: List[Document], limit_chars: int = 5000) -> str:
             break
 
     context = "\n\n".join(parts)
+    
+    # Kiểm tra số token (nếu dùng tiktoken)
+    enc = get_encoding("cl100k_base")
+    n_tokens = len(enc.encode(context))
+    print(f"🧮 Context tokens: {n_tokens}")
+
     return context[:limit_chars]
 
 
@@ -110,7 +111,7 @@ def fuse_chunks_by_heading(docs: List[Document]) -> List[Document]:
             current_meta = {**current_meta, **{k: v for k, v in d.metadata.items() if v not in [None, ""]}}
         else:
             current_meta = d.metadata
-            
+
         current_texts.append(d.page_content.strip())
 
     if current_texts:

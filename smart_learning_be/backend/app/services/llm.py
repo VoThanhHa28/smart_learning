@@ -1,71 +1,65 @@
-import os
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_ollama import ChatOllama
+# app/services/llm.py
+import os, asyncio
+from dataclasses import dataclass
+from typing import Iterable
 from dotenv import load_dotenv
-from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 load_dotenv()
 
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-pro")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
-_llm = None
+@dataclass
+class _Msg:
+    content: str
 
-def get_llm(streaming: bool = False):
-    """
-    Trả về Gemini LLM (hỗ trợ async).
-    """
-    global _llm
-    if _llm is not None:
-        return _llm
+class _GeminiAdapter:
+    def __init__(self, streaming: bool = False):
+        if not GOOGLE_API_KEY:
+            raise ValueError("❌ GOOGLE_API_KEY not set")
+        # KHÔNG gắn StreamingStdOutCallbackHandler để tránh in đúp
+        self.llm = ChatGoogleGenerativeAI(
+            model=GEMINI_MODEL,
+            google_api_key=GOOGLE_API_KEY,  # type: ignore
+            temperature=0.3,
+            top_k=32,
+            top_p=0.9,
+            model_kwargs={"candidate_count": 1},  # type: ignore
+            streaming=streaming,  # type: ignore
+        )
 
-    if not GOOGLE_API_KEY:
-        raise ValueError("❌ GOOGLE_API_KEY not set in .env")
-    
-    callbacks = [StreamingStdOutCallbackHandler()] if streaming else None
-    
-    _llm = ChatGoogleGenerativeAI(
-        model=GEMINI_MODEL,
-        google_api_key=GOOGLE_API_KEY,
-        temperature=0.3,
-        top_k=32,
-        top_p=0.9,
-        model_kwargs={"candidate_count": 1},
-        streaming=streaming,       # ✅ dùng param này
-        callbacks=callbacks        # ✅ để in token ra console
-    )
-    return _llm
+    # sync
+    def invoke(self, prompt: str) -> _Msg:
+        res = self.llm.invoke(prompt)
+        # LangChain trả AIMessage có .content
+        return _Msg(content=getattr(res, "content", str(res) or ""))
 
+    # async
+    async def ainvoke(self, prompt: str) -> _Msg:
+        res = await self.llm.ainvoke(prompt)
+        return _Msg(content=getattr(res, "content", str(res) or ""))
 
+    # streaming: yield các chunk có .content
+    def stream(self, prompt: str) -> Iterable[_Msg]:
+        for chunk in self.llm.stream(prompt):
+            c = getattr(chunk, "content", None)
+            if c:
+                yield _Msg(content=c)
 
-# =======================
-# 🧠 Local LLM cho tagging
-# =======================
-from langchain_ollama import ChatOllama
+_llm_singleton = None
 
-_local_llm = None
+def get_llm(streaming: bool = False) -> _GeminiAdapter:
+    # nếu bạn muốn mỗi lần theo cờ streaming, có thể bỏ singleton
+    global _llm_singleton
+    if _llm_singleton is None:
+        _llm_singleton = _GeminiAdapter(streaming=streaming)
+    return _llm_singleton
 
-def get_local_llm(streaming: bool = False):
-    """
-    Dùng Ollama local cho semantic tagging:
-    - Không cần API key
-    - Tốc độ nhanh, JSON tốt
-    - Giữ model preload (cache)
-    """
-    global _local_llm
-    if _local_llm is not None:
-        return _local_llm
-
-    model = os.getenv("LOCAL_MODEL", "adrienbrault/nous-hermes2pro:Q4_K_S-json")  # hoặc qwen2.5:7b-instruct
-    _local_llm = ChatOllama(
-        model=model,
-        temperature=0.2,
-        top_p=0.9,
-        num_thread=os.cpu_count(),
-        num_ctx=4096,
-        num_predict=512,
-        format="json",      # ép output JSON
-        streaming=streaming,
-        keep_alive="2h"     # giữ model nóng 1 tiếng
-    )
-    return _local_llm
+# tuỳ chọn
+def warmup_llm():
+    try:
+        a = get_llm().invoke("Warm up. Reply OK.")
+        _ = a.content
+    except Exception:
+        pass

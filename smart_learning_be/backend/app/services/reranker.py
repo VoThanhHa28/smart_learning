@@ -1,152 +1,172 @@
+import logging
 import os
 import asyncio
 import time
+import re
+import shutil
+from pathlib import Path
 from typing import List
+import torch
+import torch.nn.functional as F
 from langchain_core.documents import Document
 from sentence_transformers import CrossEncoder
 from huggingface_hub import login
-import torch
-import torch.nn.functional as F
 
-# ===========================
+# ----------- Config & Constants ----------- #
 hf_token = os.getenv("HF_TOKEN")
 if hf_token:
     login(token=hf_token)
 
-
-# ===========================
-# ⚙️ Config
-# ===========================
-RERANK_MODEL = os.getenv("RERANK_MODEL", "jinaai/jina-reranker-v2-base")
-RERANK_THRESHOLD = float(os.getenv("RERANK_THRESHOLD", 0.3))  # ✅ hạ ngưỡng hợp lý cho Jina
+RERANK_MODEL = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
+RERANK_THRESHOLD = float(os.getenv("RERANK_THRESHOLD", 0.5))
+_device = "cuda" if torch.cuda.is_available() else "cpu"
 _cross_encoder = None
 
-import re
+# ----------- Helper functions ----------- #
+# imports
+import threading
+from pathlib import Path
+import shutil
+
+# lock toàn cục
+_model_lock = threading.Lock()
+
+def _hf_repo_cache_dir(repo_id: str) -> Path:
+    home = os.getenv("HF_HOME") or os.path.join(os.path.expanduser("~"), ".cache", "huggingface")
+    safe = repo_id.replace("/", "--")
+    return Path(home) / "hub" / f"models--{safe}"
+
+def reset_reranker(clear_cache: bool = False):
+    global _cross_encoder
+    if clear_cache:
+        # hub cache
+        hub = _hf_hub_dir()
+        safe = RERANK_MODEL.replace("/", "--")
+        hub_model_dir = hub / f"models--{safe}"
+        shutil.rmtree(hub_model_dir, ignore_errors=True)
+        logging.info(f"[Reranker] Cleared HF hub cache: {hub_model_dir}")
+        # modules cache
+        _purge_jina_modules()
+        logging.info(f"[Reranker] Cleared HF transformers_modules cache for Jina")
+    _cross_encoder = None
+    logging.info("[Reranker] Reset done (will reload on next use).")
+
+def log_reranker_brief(ce):
+    m, t = ce.model, ce.tokenizer
+    repo = getattr(m.config, "_name_or_path", RERANK_MODEL)
+    tok_repo = getattr(t, "name_or_path", None)
+    logging.info(f"[Reranker] repo={repo} | tok_repo={tok_repo} | tok.vocab={getattr(t, 'vocab_size', None)} | mdl.vocab={getattr(m.config, 'vocab_size', None)} | device={next(m.parameters()).device}")
+
+
+def get_reranker():
+    global _cross_encoder
+    if _cross_encoder is None:
+        def _load_model():
+            ce = CrossEncoder(
+                RERANK_MODEL,
+                device=_device,
+                max_length=256,
+                trust_remote_code=True,
+                revision=os.getenv("RERANK_REVISION", "main"),   # 👈 pin revision
+                local_files_only=False,                           # 👈 buộc check remote
+                # bạn có thể thêm: force_download=True nếu muốn ép tải
+            )
+            if _device == "cuda":
+                try: ce.model.half()
+                except Exception: pass
+            return ce
+
+        logging.info(f"🚀 Loading reranker model: {RERANK_MODEL} on {_device}")
+        ce = _load_model()
+
+        # sanity check: tokenizer vs model
+        tok_vs = getattr(ce.tokenizer, "vocab_size", None)
+        mdl_vs = getattr(ce.model.config, "vocab_size", None)
+        if tok_vs and mdl_vs and tok_vs != mdl_vs:
+            logging.warning(f"[Reranker] Vocab mismatch tok={tok_vs} vs mdl={mdl_vs} → purge & reload")
+            reset_reranker(clear_cache=True)
+            ce = _load_model()
+
+        log_reranker_brief(ce)  # 👈 log ngắn gọn
+
+        _cross_encoder = ce
+    return _cross_encoder
+
+def log_reranker():
+    ce = get_reranker()
+    m, t = ce.model, ce.tokenizer
+    repo = getattr(m.config, "_name_or_path", RERANK_MODEL)
+    rev  = getattr(m.config, "_commit_hash", None) or getattr(m.config, "revision", None)
+    tok_vs = getattr(t, "vocab_size", None)
+    mdl_vs = getattr(m.config, "vocab_size", None)
+    device = next(m.parameters()).device
+    dtype  = getattr(m, "dtype", None)
+    logging.info(f"[Reranker] repo={repo} rev={rev} tok.vocab={tok_vs} mdl.vocab={mdl_vs} dtype={dtype} device={device}")
 
 def clean_doc(text: str) -> str:
-    """
-    Làm sạch văn bản trước khi rerank.
-    - Loại bỏ code, markdown, HTML, ký tự đặc biệt.
-    - Giữ lại ngữ nghĩa chính của nội dung.
-    - Không làm hỏng dấu câu, không hư tiếng Việt.
-    """
-
     if not text:
         return ""
-
-    # ✅ 1. Gộp khoảng trắng & normalize linebreaks
     text = text.replace("\r", "\n")
-    text = re.sub(r"\n{2,}", "\n", text)  # gộp nhiều dòng trống
+    text = re.sub(r"\n{2,}", "\n", text)
     text = re.sub(r"[ \t]+", " ", text)
-
-    # ✅ 2. Xóa code block (```...```) và inline code (`...`)
-    text = re.sub(r"```[\s\S]*?```", " ", text)  # multi-line code
-    text = re.sub(r"`[^`]+`", " ", text)         # inline code
-
-    # ✅ 3. Xóa lệnh REPL (>>> hoặc In [x]:)
+    text = re.sub(r"```([\s\S]*?)```", lambda m: "\n" + m.group(1) + "\n", text)
+    text = re.sub(r"`([^`]+)`", r"\1", text)
     text = re.sub(r"^>>>.*$", " ", text, flags=re.M)
     text = re.sub(r"^In\s*\[\d*\]:.*$", " ", text, flags=re.M)
     text = re.sub(r"^Out\s*\[\d*\]:.*$", " ", text, flags=re.M)
-
-    # ✅ 4. Xóa markdown heading / bullet / numbering
     text = re.sub(r"^#+\s*", "", text, flags=re.M)
     text = re.sub(r"^[\*\-\+]\s+", "", text, flags=re.M)
     text = re.sub(r"^\d+\.\s+", "", text, flags=re.M)
-
-    # ✅ 5. Xóa HTML / XML tags
-    text = re.sub(r"<[^>]+>", " ", text)
-
-    # ✅ 6. Xóa ký tự rác & emoji không liên quan
+    text = re.sub(r"</?[A-Za-z][A-Za-z0-9\-]*(\s[^<>]*)?>", " ", text)
     text = re.sub(r"[■◆●►◼▪¤•★☆※☞✓✔️❌✗➤→⇒⬇⬆⬅➡🔹🔸🔻🔺💡🔥🚀⭐🧠✅❗]", " ", text)
-
-    # ✅ 7. Xóa JSON / YAML block (thường xuất hiện trong log)
-    text = re.sub(r"\{[\s\S]*?\}", " ", text)  # JSON
-    text = re.sub(r"---[\s\S]*?---", " ", text)  # YAML
-
-    # ✅ 8. Giới hạn độ dài để tránh reranker quá tải
+    text = re.sub(r"\{[\s\S]*?\}", " ", text)
+    text = re.sub(r"---[\s\S]*?---", " ", text)
     text = text[:3000]
-
-    # ✅ 9. Làm gọn lại khoảng trắng và dòng cuối
     text = re.sub(r"\s+", " ", text).strip()
-
     return text
 
-
-# ===========================
-# 🚀 Lazy load CrossEncoder
-# ===========================
-def get_reranker():
-    """Load model 1 lần duy nhất, GPU-optimized."""
-    global _cross_encoder
-    if _cross_encoder is None:
-        print(f"🚀 Loading reranker model: {RERANK_MODEL}")
-        _cross_encoder = CrossEncoder(
-            RERANK_MODEL,
-            device="cuda",
-            max_length=512,
-            trust_remote_code=True,   # ✅ cần cho Jina model
-        )
-    return _cross_encoder
-
-
-# ===========================
-# 🧠 Async Rerank Function
-# ===========================
+# ----------- Rerank Function ----------- #
 async def rerank(query: str, docs: List[Document], top_n: int = 5) -> List[Document]:
-    """
-    Async reranker:
-    - Gọi CrossEncoder trong thread pool để không block event loop
-    - Áp dụng threshold lọc doc yếu
-    - Log chi tiết thời gian & score range
-    """
     if not docs:
         return []
 
     t0 = time.time()
-    model = get_reranker()
+    try:
+        model = get_reranker()
+    except Exception as e:
+        logging.exception("[Reranker] load failed, falling back to pass-through")
+        # trả về docs top_n không rerank để không vỡ pipeline
+        return docs[:top_n]
 
     for d in docs:
         d.metadata["clean_text"] = clean_doc(d.page_content)
 
-    # for d in docs[:3]:
-    #     print(f"---DOC---\n{d.page_content[:1000]}")
-
     pairs = [[query, d.metadata.get("clean_text") or d.page_content] for d in docs]
 
+    def _predict():
+        with torch.inference_mode():
+            scores_tensor = model.predict(pairs, convert_to_tensor=True)
+            scores = torch.sigmoid(scores_tensor).detach().cpu().tolist()
+        return scores
 
-    # ⚡ chạy trong thread pool để tránh block asyncio
-    loop = asyncio.get_event_loop()
-    # predict ra tensor thay vì list
-    scores = model.predict(pairs, convert_to_tensor=True)
-    scores = torch.sigmoid(scores).cpu().tolist()
+    if _device == "cuda":
+        scores = _predict()
+    else:
+        loop = asyncio.get_event_loop()
+        scores = await loop.run_in_executor(None, _predict)
 
-
-    # 🧩 Gắn score vào metadata
     for d, s in zip(docs, scores):
         d.metadata["rerank_score"] = float(s)
 
-
-    for i, d in enumerate(docs[:3]):
-        print(f"\n[DOC {i}] Score={d.metadata['rerank_score']:.3f}")
-        print(f"Clean text:\n{d.metadata['clean_text'][:1000]}\n")
-
-    # 📊 Sort theo score giảm dần
     reranked = sorted(docs, key=lambda x: x.metadata["rerank_score"], reverse=True)
     top_docs = reranked[:top_n]
-
-    # ✅ Lọc theo threshold hợp lý (Jina: điểm 0.4–0.9 là mạnh)
     filtered = [d for d in top_docs if d.metadata["rerank_score"] >= RERANK_THRESHOLD]
 
-    t1 = time.time()
-    dur = t1 - t0
-
-    # 🪶 Logging chuẩn expert
-    print(
-        f"🏅 [Reranker] Scored={len(docs)}, "
-        f"Selected={len(filtered)}/{len(top_docs)} "
-        f"(thr={RERANK_THRESHOLD}) | "
-        f"max={max(scores):.3f} min={min(scores):.3f} | ⏱️ {dur:.3f}s"
+    dur = time.time() - t0
+    logging.info(
+        "🏅 [Reranker] scored=%d selected=%d/%d thr=%.2f max=%.3f min=%.3f ⏱️ %.3fs",
+        len(docs), len(filtered), len(top_docs), RERANK_THRESHOLD,
+        max(scores or [0]), min(scores or [0]), dur
     )
 
-    # ✅ Fallback nếu tất cả score thấp
     return filtered or top_docs[:2]

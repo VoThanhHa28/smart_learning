@@ -9,11 +9,11 @@ from docling.pipeline.standard_pdf_pipeline import StandardPdfPipeline
 from docling.pipeline.simple_pipeline import SimplePipeline
 from docling_core.types import DoclingDocument
 from docling.chunking import HybridChunker   # ✅ dùng Docling HybridChunker
+from docling.backend.docling_parse_v2_backend import DoclingParseV2DocumentBackend
 
 from docling.datamodel.pipeline_options import PdfPipelineOptions, PaginatedPipelineOptions
 from docling.datamodel.base_models import InputFormat
 from docling.document_converter import PdfFormatOption
-from docling_core.types import DoclingDocument
 from .utils.common_utils import slugify_filename
 
 
@@ -41,7 +41,6 @@ import asyncio
 logging.getLogger("docling").setLevel(logging.ERROR)
 
 
-import torch
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.benchmark = True
 torch.cuda.empty_cache()
@@ -206,12 +205,12 @@ from concurrent.futures import ThreadPoolExecutor
 import fitz  # import PyMuPDF
 
 def fast_convert_pdf(file_path, opts, max_workers=4):
-    opts.output_dir = None
-    opts.save_intermediate = False
+    # opts.output_dir = None
+    # opts.save_intermediate = False
     os.environ["DOCLING_SAVE_TMP"] = "false"
     converter = DocumentConverter(
         format_options={InputFormat.PDF: PdfFormatOption(
-            pipeline_cls=StandardPdfPipeline,
+            backend=DoclingParseV2DocumentBackend,
             pipeline_options=opts
         )}
     )
@@ -278,11 +277,12 @@ class DoclingPipeline:
             opts.do_formula_enrichment = False if self.fast_mode else self.enable_formula
             opts.do_ocr = False  # OCR riêng rồi
 
+
             # ✅ Dùng StandardPdfPipeline nhưng ở chế độ "nhẹ" (lite)
             converter = DocumentConverter(
                 format_options={
                     InputFormat.PDF: PdfFormatOption(
-                        pipeline_cls=StandardPdfPipeline,
+                        backend=DoclingParseV2DocumentBackend,
                         pipeline_options=opts
                     )
                 }

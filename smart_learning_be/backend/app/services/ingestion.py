@@ -4,9 +4,9 @@ _pipeline = DoclingPipeline(
     lang="vi",
     enable_ocr=False,
     enable_code=False,
-    enable_formula=True,
+    enable_formula=False,
     enable_table=False,
-    fast_mode=True  # ⚠️ tắt fast_mode để bật enrichment thật sự
+    fast_mode=True  # ✅ bật enrichment thật
 )
 
 async def ingest_file(file_path: str, course_id: str, subject: str):

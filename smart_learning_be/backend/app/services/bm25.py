@@ -21,16 +21,19 @@ def load_corpus() -> List[Document]:
 
 
 
-def get_bm25_retriever(k: int = 12, subject: str | None = None) -> BM25Retriever | None:
+def get_bm25_retriever(k: int = 12, subject: str | None = None, course_id: str | None = None) -> BM25Retriever | None:
     if not USE_BM25:
         return None
-    key = (subject or "__ALL__").lower()
+    key = f"{(subject or '__ALL__').lower()}::{(course_id or '__ALL__').lower()}"
     if key not in _bm25_cache:
-        docs = load_corpus() if subject is None else [
-            d for d in load_corpus() if d.metadata.get("subject", "").lower() == (subject or "").lower()
-        ]
-        if not docs:
-            raise ValueError(f"❌ Không có tài liệu cho subject={subject}")
-        _bm25_cache[key] = BM25Retriever.from_documents(docs)
+        all_docs = load_corpus()
+        if subject:
+            all_docs = [d for d in all_docs if (d.metadata.get("subject","").lower()==subject.lower())]
+        if course_id:
+            all_docs = [d for d in all_docs if (d.metadata.get("course_id","").lower()==course_id.lower())]
+        if not all_docs:
+            # Có thể trả None thay vì raise nếu muốn “BM25 optional”
+            return None
+        _bm25_cache[key] = BM25Retriever.from_documents(all_docs)
     _bm25_cache[key].k = k
     return _bm25_cache[key]

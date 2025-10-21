@@ -1,0 +1,147 @@
+# ===============================
+# 🎯 Intent-level retrieval strategy (Expert Config)
+# ===============================
+
+_default:
+  retrieve:
+    k_dense: 12
+    k_sparse: 24
+    top_after_rrf: 48
+    use_hyde: false
+  rerank:
+    top_n: 8
+  context:
+    max_main: 4
+    max_supp: 2
+
+definition:
+  retrieve:
+    k_dense: 8
+    k_sparse: 16
+    top_after_rrf: 32
+  rerank:
+    top_n: 6
+  context:
+    max_main: 4
+    max_supp: 1
+
+comparison:
+  retrieve:
+    k_dense: 12
+    k_sparse: 24
+    top_after_rrf: 48
+  rerank:
+    top_n: 10
+  context:
+    max_main: 6
+    max_supp: 4
+
+example:
+  retrieve:
+    k_dense: 10
+    k_sparse: 20
+    top_after_rrf: 40
+  rerank:
+    top_n: 8
+  context:
+    max_main: 5
+    max_supp: 3
+
+application:
+  retrieve:
+    k_dense: 10
+    k_sparse: 20
+    top_after_rrf: 40
+  rerank:
+    top_n: 8
+  context:
+    max_main: 5
+    max_supp: 3
+
+exercise:
+  retrieve:
+    k_dense: 8
+    k_sparse: 16
+    top_after_rrf: 32
+  rerank:
+    top_n: 6
+  context:
+    max_main: 3
+    max_supp: 2
+
+summary:
+  retrieve:
+    k_dense: 6
+    k_sparse: 12
+    top_after_rrf: 24
+  rerank:
+    top_n: 5
+  context:
+    max_main: 3
+    max_supp: 1
+
+theory:
+  retrieve:
+    k_dense: 10
+    k_sparse: 20
+    top_after_rrf: 40
+  rerank:
+    top_n: 8
+  context:
+    max_main: 5
+    max_supp: 2
+
+warning:
+  retrieve:
+    k_dense: 10
+    k_sparse: 20
+    top_after_rrf: 40
+  rerank:
+    top_n: 8
+  context:
+    max_main: 4
+    max_supp: 2
+
+socratic_question:
+  retrieve:
+    k_dense: 6
+    k_sparse: 12
+    top_after_rrf: 24
+  rerank:
+    top_n: 6
+  context:
+    max_main: 2
+    max_supp: 1
+
+quick_check:
+  retrieve:
+    k_dense: 6
+    k_sparse: 12
+    top_after_rrf: 24
+  rerank:
+    top_n: 5
+  context:
+    max_main: 2
+    max_supp: 1
+
+paraphrase:
+  retrieve:
+    k_dense: 8
+    k_sparse: 16
+    top_after_rrf: 32
+  rerank:
+    top_n: 6
+  context:
+    max_main: 3
+    max_supp: 1
+
+multi_part:
+  retrieve:
+    k_dense: 12
+    k_sparse: 24
+    top_after_rrf: 48
+  rerank:
+    top_n: 10
+  context:
+    max_main: 6
+    max_supp: 4

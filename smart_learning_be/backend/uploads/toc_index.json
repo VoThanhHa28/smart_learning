@@ -1,5 +1,5 @@
 {
-  "P1_26bd2df3_abae_4c1c_b55e_d81aadf62643_thinkpython2": {
+  "P1_c36be927_88af_42bc_8c50_1d5b4075e8b3_thinkpython2": {
     "course_id": "P1",
     "subject": "Programming",
     "toc": [
@@ -7,25 +7,6 @@
       "1",
       "1.1",
       "1.2"
-    ]
-  },
-  "P2_17b58d23_a2c5_4f4c_a6af_ac49539593f0_lap_trinh_python_co_ban": {
-    "course_id": "P2",
-    "subject": "Programming",
-    "toc": [
-      "1. Introduction",
-      "2. Cài đặt Python",
-      "3. Bắt đầu",
-      "4. Biến và kiểu dữ liệu",
-      "5. Toán tử và biểu thức",
-      "6. Câu lệnh điều khiển If else",
-      "7. Vòng lặp",
-      "8. Cấu trúc dữ liệu",
-      "9. Chuỗi",
-      "10. Hàm",
-      "11. Xử lý tập tin",
-      "12. Exceptions",
-      "13. Class"
     ]
   }
 }

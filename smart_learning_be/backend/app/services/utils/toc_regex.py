@@ -68,6 +68,11 @@ def update_toc_index(file_path: str, course_id: str, subject: str, toc_list: lis
 
     key = slugify_filename(file_path, course_id)
 
+    # Dọn key trùng theo course_id
+    for old_key in list(toc_index.keys()):
+        if old_key.startswith(f"{course_id}_") and old_key != key:
+            del toc_index[old_key]
+
     toc_index[key] = {
         "course_id": course_id,
         "subject": subject,

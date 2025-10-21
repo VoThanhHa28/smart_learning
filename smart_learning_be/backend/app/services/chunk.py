@@ -6,7 +6,6 @@ from .sentence_splitter import split_sentences
 from typing import List
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
-from .sentence_splitter import split_sentences  # bạn đã có
 from docling_core.types import DoclingDocument
 
 def docling_split_to_docs(

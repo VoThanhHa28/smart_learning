@@ -15,7 +15,7 @@ async def parse_pdf_async(file_path: str, dpi: int = 200) -> str:
     doc = fitz.open(file_path)
     tasks = []
     for page in doc:
-        pix = page.get_pixmap(dpi=dpi)
+        pix = page.get_pixmap(dpi=dpi) #type: ignore
         img_bytes = pix.tobytes("png")
         tasks.append(ocr_page_async(img_bytes))
 
