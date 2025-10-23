@@ -26,6 +26,9 @@ COLLECTION_NAME = os.getenv("MILVUS_COLLECTION", "smart_learning")
 EMBED_DIM = int(os.getenv("EMBED_DIM", "768"))
 METRIC_TYPE = os.getenv("MILVUS_METRIC", "COSINE")
 
+# app/services/vectorstore.py
+from pymilvus import utility
+
 # ========= Globals (cache) =========
 _CONNECTED = False
 _COLLECTION: Optional[Collection] = None
@@ -63,6 +66,27 @@ def get_vectorstore():
     )
     return _vs
 
+def _ensure_partitions_loaded(col: Collection, subject: str | None):
+    """
+    Nếu đã load collection trước đó nhưng có partition mới (vd p_programming) được insert sau,
+    đảm bảo partition đó cũng được load. Nếu không chỉ định subject, load toàn bộ.
+    """
+    try:
+        parts = [p.name for p in col.partitions]
+        # Nếu có subject → chỉ load partition tương ứng
+        if subject:
+            p = f"p_{subject.strip().lower()}"
+            if p not in parts:
+                # Partition có thể chưa tồn tại (do corpus cũ) → bỏ qua
+                return
+            col.load(partition_names=[p])
+            logging.info(f"[milvus] ensure loaded partition: {p}")
+        else:
+            # Không có subject filter → load all partitions
+            col.load()
+            logging.info(f"[milvus] ensure collection (all partitions) loaded")
+    except Exception as e:
+        logging.warning(f"[milvus] ensure_partitions_loaded warn: {e}")
 
 # ====================== #
 # 🧠 Hàm xử lý 1 batch   #
@@ -146,6 +170,16 @@ def process_batch(vs, embeddings, batch, embed=True):
             [embeddings_list, pages, subjects, courses, texts],
             partition_name=partition if partition else None
         )
+
+        try:
+            if partition:
+                collection.load(partition_names=[partition])
+                logging.info(f"[milvus] loaded partition right after insert: {partition}")
+            else:
+                collection.load()
+                logging.info("[milvus] loaded collection right after insert")
+        except Exception as e:
+            logging.warning(f"[milvus] load-after-insert warn: {e}")
 
         return len(batch)
 
@@ -330,6 +364,13 @@ async def similarity_search(
         return []
 
     col = _get_collection()
+
+    subj_for_load = None
+    if where and (where.get("subject") or "").strip():
+        subj_for_load = (where.get("subject") or "").strip().lower()
+
+    # 🔐 Load/refresh partition tương ứng (hoặc toàn collection nếu không có subject)
+    _ensure_partitions_loaded(col, subj_for_load)
 
     # Lấy embedding query từ embed_fn bên ngoài (giữ logic hiện tại)
     if embed_fn is None:

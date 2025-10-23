@@ -10,7 +10,8 @@ from app.services.vectorstore import get_vectorstore
 from app.services.llm import get_llm
 from app.services.hybrid import hybrid_retrieve
 from app.services.reranker import rerank as heavy_rerank
-from app.services.rag_graph import get_graph, State
+from app.services.rag_graph import get_graph
+from app.services.rag_state import State
 from app.services.prompt_utils import QA_PROMPT
 from app.services.config import (
     RERANKER_MODE,
@@ -18,8 +19,6 @@ from app.services.config import (
     LIGHT_RERANKER_MODEL,
     LIGHT_RERANKER_TOPK,
 )
-
-
 
 # ================== #
 # 🧩 Helper Functions #

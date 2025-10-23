@@ -46,15 +46,13 @@ class _GeminiAdapter:
             c = getattr(chunk, "content", None)
             if c:
                 yield _Msg(content=c)
-
-_llm_singleton = None
+                
+_llm_singletons = {True: None, False: None}
 
 def get_llm(streaming: bool = False) -> _GeminiAdapter:
-    # nếu bạn muốn mỗi lần theo cờ streaming, có thể bỏ singleton
-    global _llm_singleton
-    if _llm_singleton is None:
-        _llm_singleton = _GeminiAdapter(streaming=streaming)
-    return _llm_singleton
+    if _llm_singletons[streaming] is None:
+        _llm_singletons[streaming] = _GeminiAdapter(streaming=streaming)
+    return _llm_singletons[streaming]
 
 # tuỳ chọn
 def warmup_llm():

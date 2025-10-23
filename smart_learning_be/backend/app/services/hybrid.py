@@ -93,7 +93,7 @@ async def hybrid_retrieve(  # implementation
 
     async def dense_search():
         # similarity_search là async → không block, giữ nguyên tham số
-        return await similarity_search(query, k=k_dense, where=filters, threshold=0.5, log=False)
+        return await similarity_search(query, k=k_dense, where=None, threshold=0.5, log=True)
 
     async def sparse_search():
         if not USE_BM25:

@@ -17,8 +17,14 @@ hf_token = os.getenv("HF_TOKEN")
 if hf_token:
     login(token=hf_token)
 
-RERANK_MODEL = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
+RERANK_MODEL = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-base")
 RERANK_THRESHOLD = float(os.getenv("RERANK_THRESHOLD", 0.5))
+RERANK_PREVIEW = os.getenv("RERANK_PREVIEW", "0").lower() in ("1", "true", "yes")
+PREVIEW_WINDOW = int(os.getenv("RERANK_PREVIEW_WINDOW", "550"))
+PREVIEW_HEAD   = int(os.getenv("RERANK_PREVIEW_HEAD", "1200"))
+PREVIEW_TAIL   = int(os.getenv("RERANK_PREVIEW_TAIL", "800"))
+PREVIEW_MID    = int(os.getenv("RERANK_PREVIEW_MID", "800"))
+
 _device = "cuda" if torch.cuda.is_available() else "cpu"
 _cross_encoder = None
 
@@ -121,9 +127,91 @@ def clean_doc(text: str) -> str:
     text = re.sub(r"[■◆●►◼▪¤•★☆※☞✓✔️❌✗➤→⇒⬇⬆⬅➡🔹🔸🔻🔺💡🔥🚀⭐🧠✅❗]", " ", text)
     text = re.sub(r"\{[\s\S]*?\}", " ", text)
     text = re.sub(r"---[\s\S]*?---", " ", text)
-    text = text[:3000]
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+def _extract_keyword_spans(text: str, query: str, max_terms: int = 6):
+    """
+    Tạo danh sách (start, end) cho các từ khóa trong query (lọc stop-ish: độ dài >=3).
+    Dùng regex không phân biệt hoa thường; trả về list có thể rỗng.
+    """
+    if not text or not query:
+        return []
+    # chọn term đơn giản: tách theo chữ/số, bỏ quá ngắn
+    terms = [t.lower() for t in re.findall(r"[A-Za-zÀ-ỹ0-9_]+", query) if len(t) >= 3]
+    terms = list(dict.fromkeys(terms))[:max_terms]  # de-dup, giới hạn
+    spans = []
+    low = text.lower()
+    for t in terms:
+        for m in re.finditer(re.escape(t), low):
+            spans.append((m.start(), m.end()))
+    return spans
+
+def _pick_best_center(spans: list[tuple[int,int]], text_len: int) -> int | None:
+    """
+    Chọn “tâm” cửa sổ:
+    - nếu có nhiều spans, chọn span trung tâm theo median vị trí (ổn định hơn “đầu tiên”).
+    - nếu rỗng → None.
+    """
+    if not spans:
+        return None
+    centers = [(s+e)//2 for s, e in spans]
+    centers.sort()
+    return centers[len(centers)//2]
+
+def _window_by_center(text: str, center: int, radius: int) -> str:
+    a = max(center - radius, 0)
+    b = min(center + radius, len(text))
+    return text[a:b].strip()
+
+def _fallback_head_mid_tail(text: str) -> str:
+    """
+    Khi không xác định được vị trí hit, lấy head + mid + tail để tránh bias “đầu nặng”.
+    """
+    n = len(text)
+    if n <= (PREVIEW_HEAD + PREVIEW_MID + PREVIEW_TAIL + 200):
+        return text  # ngắn → trả full
+    head = text[:PREVIEW_HEAD]
+    mid_start = max((n // 2) - (PREVIEW_MID // 2), 0)
+    mid = text[mid_start: mid_start + PREVIEW_MID]
+    tail = text[-PREVIEW_TAIL:]
+    return (head + "\n...\n" + mid + "\n...\n" + tail).strip()
+
+def build_preview_for_rerank(clean_text: str, query: str, meta: dict) -> str:
+    """
+    Trả về đoạn preview ~ tương đương <= vài ngàn ký tự cho CrossEncoder.
+    Ưu tiên dùng spans từ metadata nếu có (bm25/keywords), nếu không thì rút từ query.
+    """
+    if not RERANK_PREVIEW:
+        # Giữ hành vi cũ: đã clean ở clean_doc; không slice ở đây (để backward-compat)
+        return clean_text
+
+    # 1) thử lấy spans từ metadata (tuỳ pipeline BM25 của bạn)
+    spans = []
+    for key in ("bm25_spans", "keyword_spans", "match_positions"):
+        if key in (meta or {}):
+            # mong đợi dạng [(s,e), ...] hoặc [{"start":s,"end":e}, ...]
+            raw = meta[key] or []
+            for it in raw:
+                if isinstance(it, (list, tuple)) and len(it) == 2:
+                    s, e = int(it[0]), int(it[1])
+                    if 0 <= s < e <= len(clean_text):
+                        spans.append((s, e))
+                elif isinstance(it, dict) and "start" in it and "end" in it:
+                    s, e = int(it["start"]), int(it["end"])
+                    if 0 <= s < e <= len(clean_text):
+                        spans.append((s, e))
+    # 2) nếu không có, tự tạo spans từ query
+    if not spans:
+        spans = _extract_keyword_spans(clean_text, query)
+
+    center = _pick_best_center(spans, len(clean_text))
+    if center is not None:
+        return _window_by_center(clean_text, center, PREVIEW_WINDOW)
+
+    # 3) fallback: head + mid + tail
+    return _fallback_head_mid_tail(clean_text)
+
 
 # ----------- Rerank Function ----------- #
 async def rerank(query: str, docs: List[Document], top_n: int = 5) -> List[Document]:
@@ -141,7 +229,12 @@ async def rerank(query: str, docs: List[Document], top_n: int = 5) -> List[Docum
     for d in docs:
         d.metadata["clean_text"] = clean_doc(d.page_content)
 
-    pairs = [[query, d.metadata.get("clean_text") or d.page_content] for d in docs]
+    pairs = []
+    for d in docs:
+        ct = d.metadata.get("clean_text") or d.page_content
+        # NEW: build preview thông minh trước khi đưa vào CrossEncoder
+        preview = build_preview_for_rerank(ct, query, d.metadata or {})
+        pairs.append([query, preview])
 
     def _predict():
         with torch.inference_mode():
