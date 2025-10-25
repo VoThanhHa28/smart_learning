@@ -1,10 +1,10 @@
 from fastapi import FastAPI
-from app.routers import index, query
+from app.api.routers import index, query
 from dotenv import load_dotenv
 import logging
-from app.services.llm import warmup_llm
-from app.services.vectorstore import warmup_vectorstore
-from app.services.rag_graph import warmup_rag  # ✅ dùng hàm public
+from .infrastructure.llm.llm import warmup_llm
+from .rag.retrieval.vectorstore import warmup_vectorstore
+from .rag.rag_graph import warmup_rag  # ✅ dùng hàm public
 
 logging.basicConfig(
     level=logging.INFO,

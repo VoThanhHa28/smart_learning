@@ -1,11 +1,12 @@
 import re, fitz, json, os
 from app.services.utils.common_utils import slugify_filename
+from pathlib import Path
 
 # ==========================================================
 # 🧭 Expert-level TOC extractor (regex + heuristic)
 # ==========================================================
 
-def extract_toc(file_path: str, ocr_text: str = None, max_lines: int = 600):
+def extract_toc(file_path: str, ocr_text: str = None , max_lines: int = 600): #type: ignore
     """
     Expert TOC extractor: phát hiện TOC theo pattern số (1, 1.1, 1.2.3...).
     Bỏ qua Preface, Chapter text. Chính xác cho >98% giáo trình kỹ thuật.
@@ -16,7 +17,7 @@ def extract_toc(file_path: str, ocr_text: str = None, max_lines: int = 600):
     else:
         with fitz.open(file_path) as doc:
             # đọc tối đa 30 trang đầu
-            pages = [doc[i].get_text("text") for i in range(min(len(doc), 30))]
+            pages = [doc[i].get_text("text") for i in range(min(len(doc), 30))] #type: ignore
             text = "\n".join(pages)
 
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
@@ -49,20 +50,23 @@ def extract_toc(file_path: str, ocr_text: str = None, max_lines: int = 600):
 # ==========================================================
 def update_toc_index(file_path: str, course_id: str, subject: str, toc_list: list):
     """
-    Ghi TOC vào file uploads/toc_index.json
+    Ghi TOC vào file data/uploads/toc_index.json
     - Key: slugify(course_id + filename)
     - Tự động tạo hoặc ghi đè entry cũ
     """
-    base_dir = "uploads"
-    os.makedirs(base_dir, exist_ok=True)
-    index_path = os.path.join(base_dir, "toc_index.json")
+    this_file = Path(__file__).resolve()                              # .../backend/app/services/utils/toc_regex.py
+    backend_dir = this_file.parents[3]                                 # .../backend
+    data_dir = Path(os.getenv("DATA_DIR", backend_dir / "data"))
+    uploads_dir = Path(os.getenv("UPLOADS_DIR", data_dir / "uploads"))
+    uploads_dir.mkdir(parents=True, exist_ok=True)
 
-    if os.path.exists(index_path):
-        with open(index_path, "r", encoding="utf-8") as f:
-            try:
-                toc_index = json.load(f)
-            except json.JSONDecodeError:
-                toc_index = {}
+    index_path = uploads_dir / "toc_index.json"
+
+    if index_path.exists():
+        try:
+            toc_index = json.loads(index_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            toc_index = {}
     else:
         toc_index = {}
 
@@ -79,7 +83,5 @@ def update_toc_index(file_path: str, course_id: str, subject: str, toc_list: lis
         "toc": toc_list,
     }
 
-    with open(index_path, "w", encoding="utf-8") as f:
-        json.dump(toc_index, f, ensure_ascii=False, indent=2)
-
+    index_path.write_text(json.dumps(toc_index, ensure_ascii=False, indent=2), encoding="utf-8")
     return key
