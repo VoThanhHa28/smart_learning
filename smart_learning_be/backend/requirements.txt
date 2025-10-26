@@ -43,7 +43,7 @@ protobuf==5.27.2
 
 # --- Google GenAI (optional, nếu bạn dùng ChatGoogleGenerativeAI) ---
 langchain-google-genai==2.0.9
-langchain_ollama=0.3.10
+langchain_ollama==0.3.10
 langchain-huggingface>=0.0.3
 google-generativeai==0.8.5
 google-ai-generativelanguage==0.6.15

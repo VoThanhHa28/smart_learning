@@ -14,8 +14,7 @@ from huggingface_hub import login
 
 # ----------- Config & Constants ----------- #
 hf_token = os.getenv("HF_TOKEN")
-if hf_token:
-    login(token=hf_token)
+
 
 RERANK_MODEL = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-base")
 RERANK_THRESHOLD = float(os.getenv("RERANK_THRESHOLD", 0.5))

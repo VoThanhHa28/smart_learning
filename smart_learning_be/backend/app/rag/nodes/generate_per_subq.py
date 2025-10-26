@@ -1,186 +1,190 @@
-# app/services/nodes/generate_per_subq.py
-import asyncio, logging
+import asyncio
+import logging
+import time # <-- Thêm time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, List
-from ..rag_state import State
+# Sửa import typing
+from typing import Dict, List, Tuple, Optional, Any
+from langchain_core.documents import Document # <-- Import Document
+
+# Import handlers và router
+from .system_handlers import handle_system
+from .rag_handler import handle_academic_rag
+# Sửa đường dẫn lms_router nếu cần
+from ...services.lms.lms_router import route_lms_tool
+# Import State và timing
+from ..rag_state import State, _update_timing
+
+# Import Semaphore và Config
 from ...core.config import CFG
-from ..router.intent_router import get_routing
-from ..rag_runtime import mmr_select
-from ..rag_utils import build_context
-from ..retrieval.hybrid import hybrid_retrieve
-from ...infrastructure.llm.reranker import rerank as heavy_rerank
-from ...rag.prompts.prompt_utils import get_soft_hints, build_unified_block, CACHED_PROMPT
-from ...infrastructure.llm.llm_utils import sync_stream_generate
-from ...services.utils.toc_store import get_toc_by_key, get_toc_by_course, flatten_toc
-from ..prompts.prompt_utils import build_toc_validation_block 
+DEFAULT_CONCURRENCY = 5
+sem = asyncio.Semaphore(getattr(CFG, 'CONCURRENCY', DEFAULT_CONCURRENCY))
 
-def _dedup_by_sig(docs):
-    seen, out = set(), []
-    for d in docs:
-        sig = (d.metadata or {}).get("_sig") or (d.page_content or "")[:120]
-        if sig in seen: 
-            continue
-        seen.add(sig); out.append(d)
-    return out
+async def generate_per_subq(state: State) -> State:
+    """
+    Node Dispatcher V3: Gọi handlers, thu thập kết quả (answer + docs).
+    """
+    t_start = time.perf_counter()
+    print("➡️  [Node] generate_per_subq (Dispatcher): Bắt đầu...")
 
-async def generate_per_subq(state: State):
+    # --- Kiểm tra dừng sớm (Giữ nguyên) ---
     if state.get("answer") or (state.get("analyze_meta", {}).get("status") == "stop"):
-        return state
+        print("  [Dispatcher] ⏭️ Bỏ qua...")
+        return _update_timing(state, "generate_per_subq", t_start)
+    # --- Kết thúc kiểm tra ---
+
     meta = state.get("analyze_meta") or {}
     sq_items = meta.get("sub_questions_with_intent") or []
-    subqs = [item.get("subq","").strip() for item in sq_items if item.get("subq")]
-    if not subqs:
-        return state
+    if not sq_items:
+        print("  [Dispatcher] ⚠️ Không có sub-questions...")
+        return _update_timing(state, "generate_per_subq", t_start)
 
-    intent_map = {i.get("subq"): (i.get("intent") or ["definition"]) for i in sq_items}
-    topic_map  = {i.get("subq"): (i.get("topic") or "").strip() for i in sq_items}
+    print(f"➡️  [Node] generate_per_subq (Dispatcher): Đang xử lý {len(sq_items)} sub-questions...")
 
-    answers, diag_per, per_docs = {}, [], {}
-    filters = {k: v for k, v in {"subject": state.get("subject"), "course_id": state.get("course_id")}.items() if v}
-    sem = asyncio.Semaphore(CFG.CONCURRENCY)
-
-    async def _one(sq: str):
+    # --- Hàm _dispatch_one (Giữ nguyên) ---
+    # Trả về: Optional[Tuple[str, str, List[Document]]]
+    async def _dispatch_one(sq_item: dict) -> Optional[Tuple[str, str, List[Document]]]:
+        """Xử lý một sub-question, trả về (original_sq, answer, context_docs)."""
         async with sem:
-            err_msg = ""
+            original_sq = sq_item.get("original_subq", "")
+            if not original_sq: return None
+
+            intent_category = (sq_item.get("intent") or ["unknown"])[0]
+            topic_for_sq = (sq_item.get("topic") or "").strip()
+            print(f"  [Dispatcher] 💬 Bắt đầu SQ: \"{original_sq[:30]}...\" ({intent_category})")
+            handler_start_time = time.perf_counter()
+
+            ans_str: str = f"Lỗi mặc định"
+            context_docs: List[Document] = []
+            returned_sq: str = original_sq
+
             try:
-                sq_meta = next((m for m in (meta.get("sub_questions_with_intent") or []) if m.get("subq") == sq), {})
-                intents_for_sq = intent_map.get(sq, ["definition"])
-                primary_intent = intents_for_sq[0] if intents_for_sq else "definition"
-                routing = get_routing(primary_intent)
+                if intent_category == "academic_rag":
+                    print(f"    [Dispatcher] ➡️  [rag_handler]...")
+                    # rag_handler trả về (sq, ans, docs)
+                    returned_sq, ans_str, context_docs = await handle_academic_rag(sq_item, state)
 
-                # --- HANDLERS theo intent đặc biệt (bỏ qua retrieval) ---
-                if primary_intent == "unsafe":
-                    return sq, f"Xin lỗi, mình không thể hỗ trợ với nội dung \"{sq}\"."
+                elif intent_category == "lms_tools":
+                    print(f"    [Dispatcher] ➡️  [lms_router]...")
+                    # lms_router trả về (sq, ans)
+                    returned_sq, ans_str = await route_lms_tool(original_sq, state, topic_for_sq)
+                    # context_docs giữ nguyên là []
 
-                if primary_intent == "unclear":
-                    return sq, f"Mình chưa rõ \"{sq}\" nghĩa là gì; bạn có thể mô tả cụ thể hơn không?"
+                elif intent_category == "system_handlers":
+                    print(f"    [Dispatcher] ➡️  [system_handlers]...")
+                    # system_handlers trả về (sq, ans)
+                    returned_sq, ans_str = await handle_system(original_sq, state, topic_for_sq)
+                    # context_docs giữ nguyên là []
 
-                if primary_intent == "meta":
-                    try:
-                        from ...services.meta.meta_responder import search_meta
-                        meta_ans = search_meta(sq) or "Xin lỗi, mình chưa có câu trả lời cho nội dung này."
-                    except Exception as e:
-                        meta_ans = "Xin lỗi, mình chưa có câu trả lời cho nội dung này."
-                    return sq, meta_ans
+                else:
+                    print(f"    [Dispatcher] ⚠️ Handler không tồn tại: {intent_category}")
+                    ans_str = f"Lỗi: Handler không tồn tại '{intent_category}'."
 
-                if primary_intent == "toc":
-                    course_id = str(state.get("course_id") or "").strip()
-                    doc_key = state.get("doc_key")
-                    entry = get_toc_by_key(doc_key) if doc_key else get_toc_by_course(course_id)
-                    toc_lines = flatten_toc(entry)
-                    # Dùng TOC-validator: chỉ in list hợp lệ hoặc 1 câu lỗi, không TL;DR
-                    prompt_text = build_toc_validation_block(toc_lines)
-                    loop = asyncio.get_event_loop()
-                    with ThreadPoolExecutor() as pool:
-                        ans = await loop.run_in_executor(pool, sync_stream_generate, prompt_text)
-                    return sq, ans
+                # Kiểm tra subq trả về
+                if returned_sq != original_sq:
+                    print(f"  [Dispatcher] 💥 Lỗi Logic: Handler trả về subq không khớp!")
+                    ans_str = "Lỗi logic: Handler trả về subq không khớp."
+                    context_docs = [] # Reset docs
 
-                topic_sq = (sq_meta.get("topic") or meta.get("topic") or "").strip()
-
-                filters_sq = dict(filters)
-                if topic_sq:
-                    filters_sq["topic"] = topic_sq
-
-                docs = await hybrid_retrieve(
-                    sq,
-                    k_dense=routing["retrieve"]["k_dense"],
-                    k_sparse=routing["retrieve"]["k_sparse"],
-                    top_after_rrf=routing["retrieve"]["top_after_rrf"],
-                    filters=filters_sq,
-                    return_raw=False
-                )
-                before_docs = len(docs)
-                if len(docs) > routing["retrieve"]["top_after_rrf"]:
-                    docs = mmr_select(sq, docs, k=routing["retrieve"]["top_after_rrf"], lambda_mult=0.65)
-
-                reranked = await heavy_rerank(sq, docs, top_n=routing["rerank"]["top_n"])
-                selected = _dedup_by_sig(reranked[:routing["context"]["max_main"] + routing["context"]["max_supp"]])
-                per_docs[sq] = selected[:]
-
-                if not selected:
-                    topic_sq = (sq_meta.get("topic") or meta.get("topic") or sq).strip() or sq
-                    return sq, f"Tài liệu không đề cập về chủ đề \"{topic_sq}\"."
-
-                ctx = build_context(selected)
-                # --- soft hints cho CHÍNH sub-question này: 1 asked_aspect + 1 soft hint ---
-                primary_intent = intents_for_sq[0] if intents_for_sq else "definition"
-                topic_sq_final = (topic_map.get(sq) or topic_sq or sq)
-
-                # 1 câu bắt buộc: ép trọng tâm vào phần CHÍNH
-                focus_line = (
-                    f"Phần chính chỉ tập trung vào '{topic_sq_final}'; ví dụ phải cùng loại với '{topic_sq_final}'. "
-                    f"Tránh mọi chi tiết không phục vụ trực tiếp cho trọng tâm. Khía cạnh: {primary_intent}. "
-                    f"Các nội dung liên quan như hàm/công cụ phải tách riêng ở mục 'Ngoài ra' (nếu NGỮ CẢNH có)."
-                )
-
-                # 1 câu cho 'Ngoài ra' (nếu context có)
-                extra_line = (
-                    "Nếu NGỮ CẢNH có thông tin liên quan (ví dụ: công cụ/hàm phụ trợ), đặt vào mục 'Ngoài ra' riêng; "
-                    "ví dụ của mục này phải minh hoạ đúng phần liên quan, không chèn vào phần chính."
-                )
-
-                # Lấy hint theo intent và rút còn 1 câu đầu (giữ gọn)
-                _base_hints = get_soft_hints(intents_for_sq) or ""
-                base_hint = _base_hints.split(". ")[0].rstrip(".") if _base_hints else ""
-
-                # Gộp: 1 câu focus + 1 câu 'Ngoài ra' + (tuỳ) 1 câu intent
-                soft_hints = f"{focus_line} {extra_line}" if not base_hint else f"{focus_line} {extra_line} {base_hint}."
-
-                # Log để kiểm
-                logging.info("[per-subq][%s] soft_hints=%s", sq, soft_hints)
-
-                prompt_text = build_unified_block(
-                    subject=state.get("subject", "General"),
-                    context=ctx,
-                    question=sq,
-                    topic=topic_sq_final,
-                    doc_source="Tài liệu học tập",
-                    soft_hints=soft_hints
-                )
-
-                logging.info("[per-subq][%s] prompt_len=%d | ctx_len=%d | soft_hints_len=%d", sq, len(prompt_text), len(ctx), len(soft_hints))
-                logging.debug("[per-subq][%s] prompt_preview=%s", sq, prompt_text[:400].replace("\n", " ⏎ "))
-                logging.info("[per-subq] sq=%r | intents_map=%s", sq, intent_map.get(sq))
-                logging.info("[per-subq] primary_intent=%s", primary_intent)
-
-                loop = asyncio.get_event_loop() 
-                with ThreadPoolExecutor() as pool:
-                    ans = await loop.run_in_executor(pool, sync_stream_generate, CACHED_PROMPT + "\n\n---\n\n" + prompt_text)
-
-                ans_len = len(ans or "")
-                diag_per.append({"subq": sq, "intent": intents_for_sq, "docs_in": before_docs, "ctx_len": len(ctx), "ans_len": ans_len, "err": err_msg})
-                return sq, ans
+                handler_duration = round((time.perf_counter() - handler_start_time) * 1000)
+                print(f"  [Dispatcher] ✅ HOÀN THÀNH SQ: \"{original_sq[:30]}...\" sau {handler_duration} ms")
+                # Trả về cả 3 giá trị (docs có thể rỗng)
+                return original_sq, ans_str, context_docs
 
             except Exception as e:
                 err_msg = f"{type(e).__name__}: {e}"
-                logging.exception(f"[per-subq] error on '{sq}': {err_msg}")
-                return sq, f"Lỗi khi xử lý sub-question: {err_msg}"
+                print(f"  [Dispatcher] 💥 Lỗi Exception khi xử lý SQ \"{original_sq[:30]}...\": {err_msg}")
+                logging.exception(f"[Dispatcher] Exception trên subq '{original_sq}'")
+                return (original_sq, f"Lỗi Exception khi xử lý.", []) # Trả về docs rỗng khi lỗi
+    # --- Kết thúc _dispatch_one ---
 
-    results = await asyncio.gather(*[_one(sq) for sq in subqs], return_exceptions=True)
-    for r in results:
-        if isinstance(r, tuple) and len(r) == 2:
-            sq, ans = r
-            answers[sq] = ans
+    # Chạy song song (Giữ nguyên)
+    results = await asyncio.gather(*[_dispatch_one(item) for item in sq_items], return_exceptions=True)
 
-    merged_ctx_docs = _dedup_by_sig([d for docs in per_docs.values() for d in docs])
+    # --- SỬA LỖI TẬP HỢP KẾT QUẢ ---
+    sub_answers: Dict[str, str] = {}
+    # KHỞI TẠO per_subq_docs là dict RỖNG
+    per_subq_docs: Dict[str, List[Document]] = {}
+
+    print(f"  [Dispatcher] ⚙️ Đang tập hợp kết quả từ {len(results)} tasks...")
+    for idx, r in enumerate(results):
+        # Lấy original_sq từ item gốc để đảm bảo khớp
+        original_sq_for_item = sq_items[idx].get("original_subq", f"Item_{idx}_UnknownSQ")
+
+        if isinstance(r, Exception):
+            print(f"    [Dispatcher] 💥 Task {idx} (SQ: '{original_sq_for_item[:30]}...') bị lỗi Exception: {r}")
+            sub_answers[original_sq_for_item] = f"Lỗi Exception (Gather): {r}"
+            per_subq_docs[original_sq_for_item] = [] # Gán list rỗng
+
+        # Kiểm tra tuple có đúng 3 phần tử
+        elif isinstance(r, tuple) and len(r) == 3:
+            sq, ans, docs = r
+            # Kiểm tra lại lần nữa sq trả về có khớp không
+            if sq == original_sq_for_item:
+                 sub_answers[sq] = ans
+                 # GÁN DOCS VÀO ĐÚNG KEY TRONG per_subq_docs
+                 per_subq_docs[sq] = docs if isinstance(docs, list) else [] # Đảm bảo docs là list
+                 print(f"    [Dispatcher] ✨ Thu thập kết quả SQ '{sq[:30]}...': Answer len={len(ans)}, Docs count={len(per_subq_docs[sq])}")
+            else:
+                 # Trường hợp này không nên xảy ra nếu _dispatch_one đã kiểm tra
+                 print(f"    [Dispatcher] 💥 Lỗi Logic (Gather): Task {idx} trả về subq không khớp! Expected '{original_sq_for_item}', got '{sq}'")
+                 sub_answers[original_sq_for_item] = "Lỗi logic (Gather): Subq không khớp."
+                 per_subq_docs[original_sq_for_item] = []
+        elif r is None:
+             print(f"    [Dispatcher] ⚠️ Bỏ qua kết quả None cho item {idx} (SQ: '{original_sq_for_item[:30]}...').")
+             # Không cần gán gì vào dict nếu là None
+        else:
+             print(f"    [Dispatcher] 💥 Lỗi lạ (Gather): Kết quả không hợp lệ cho SQ '{original_sq_for_item[:30]}...': {type(r)}")
+             sub_answers[original_sq_for_item] = "Lỗi lạ: Kết quả không hợp lệ."
+             per_subq_docs[original_sq_for_item] = []
+
+    # --- Cập nhật state (Giữ nguyên) ---
     state_diag = dict(state.get("diag") or {})
-    state_diag["per_subq"] = diag_per
+    success_count = sum(1 for sq in sub_answers if not sub_answers[sq].startswith("Lỗi")) # Đếm câu trả lời không lỗi
+    state_diag["dispatcher"] = {"total_sq": len(sq_items), "success": success_count}
+    print(f"✅ [Node] generate_per_subq: Xử lý xong.")
 
-    # Gộp sub-answers theo đúng thứ tự sub_questions_with_intent
-    ordered = []
-    for item in (meta.get("sub_questions_with_intent") or []):
-        sq = (item.get("subq") or "").strip()
-        if sq and answers.get(sq):
-            ordered.append(answers[sq])
-    final_answer = "\n\n---\n\n".join(ordered) if ordered else None
+    # In thử key và số lượng docs trong per_subq_docs để debug
+    print(f"  [Dispatcher] DEBUG: per_subq_docs keys: {list(per_subq_docs.keys())}")
+    for k, v in per_subq_docs.items():
+         print(f"    - '{k[:30]}...': {len(v)} docs")
+
+    # ✅ NEW: Dựng ordered_blocks theo đúng thứ tự user hỏi
+    ordered_blocks = []
+    for item in sq_items:  # giữ nguyên thứ tự user hỏi
+        subq   = item.get("original_subq","")
+        intent = (item.get("intent") or ["unknown"])[0]
+        topic  = (item.get("topic") or "").strip()
+
+        if intent == "system_handlers":
+            ordered_blocks.append({
+                "kind": "system",
+                "role": topic,                 # meta | unclear | unsafe | toc
+                "subq": subq,
+                "text": (sub_answers.get(subq) or "").strip()
+            })
+        elif intent == "academic_rag":
+            ordered_blocks.append({
+                "kind": "academic",
+                "role": None,
+                "subq": subq,
+                "docs": (per_subq_docs.get(subq) or [])
+            })
+        else:
+            # nếu có loại khác (lms_tools...) thì vẫn đẩy như system
+            ordered_blocks.append({
+                "kind": "system",
+                "role": intent,
+                "subq": subq,
+                "text": (sub_answers.get(subq) or "").strip()
+            })
 
     new_state = {
         **state,
-        "sub_answers": answers,
-        "per_subq_docs": per_docs,
-        "context": merged_ctx_docs,
+        "sub_answers": sub_answers,
+        "per_subq_docs": per_subq_docs, # <-- LƯU DOCS ĐÃ THU THẬP ĐÚNG
+        "ordered_blocks": ordered_blocks,
         "diag": state_diag,
+        # Không cần 'context' ở đây nữa, reflect sẽ tự gộp 'final_context_docs'
     }
-    if final_answer:
-        new_state["answer"] = final_answer  # để node generate bỏ qua, không ghi đè
-    return new_state
+    return _update_timing(new_state, "generate_per_subq", t_start)
+

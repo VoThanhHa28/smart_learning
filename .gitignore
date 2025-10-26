@@ -71,6 +71,8 @@ huggingface/
 # ==== Vector DB / local services ====
 milvus/
 **/milvus/**
+!smart_learning_be/backend/app/infrastructure/milvus/
+!smart_learning_be/backend/app/infrastructure/milvus/**
 .db
 *.sqlite
 *.sqlite3

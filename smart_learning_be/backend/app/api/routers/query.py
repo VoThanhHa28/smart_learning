@@ -1,109 +1,167 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request # <-- Thêm Request
 from pydantic import BaseModel
-from typing import Any, List, Optional
-from ...rag.chain import retrieve_answer
+# 1. Import StreamingResponse và AsyncGenerator
+from fastapi.responses import StreamingResponse
+from typing import Any, List, Optional, AsyncGenerator
+# 2. Bỏ QueryResponse, giữ ContextChunk (hoặc định nghĩa lại nếu cần)
+# from ...rag.chain import retrieve_answer (Giữ lại)
+from ...rag.chain import retrieve_answer, dump_docs # <-- Import dump_docs nếu muốn log
 import os
 import time
+import json # <-- Thêm json
 from google.api_core.exceptions import ServiceUnavailable
 from grpc import RpcError
-from fastapi import HTTPException
-from fastapi.responses import JSONResponse
-from google.api_core.exceptions import ServiceUnavailable
-from grpc import RpcError
-import logging, time
-from typing import List
+# Bỏ JSONResponse nếu không dùng fallback kiểu cũ
+# from fastapi.responses import JSONResponse
+import logging
 
 router = APIRouter(tags=["query"])
 
-
 # ============================= #
-# 📦 Models
+# 📦 Models (Giữ lại Request, sửa Response)
 # ============================= #
 class QueryRequest(BaseModel):
     question: str
-    top_k: int = 6
+    top_k: int = 6 # Có thể bỏ top_k nếu Graph tự quản lý
     subject: Optional[str] = None
     course_id: Optional[str] = None
+    # Thêm user_id nếu cần cho tool LMS
+    # user_id: Optional[str] = "user_123" # Ví dụ
 
-
+# Model cho source trả về (có thể nhúng vào stream hoặc gửi riêng)
 class ContextChunk(BaseModel):
     page: Optional[int] = None
     text: str
+    # Thêm các metadata khác nếu muốn hiển thị
+    course_id: Optional[str] = None
+    subject: Optional[str] = None
+    score: Optional[float] = None # Ví dụ: rerank score
 
-
-class QueryResponse(BaseModel):
-    answer: str
-    sources: List[ContextChunk]
-    elapsed_ms: int
-
+# BỎ QueryResponse cũ
+# class QueryResponse(BaseModel): ...
 
 # ============================= #
-# 🚀 Query Endpoint
+# 🚀 Query Endpoint (SỬA LẠI HOÀN TOÀN)
 # ============================= #
 
-@router.post("/query", response_model=QueryResponse)
-async def query(req: QueryRequest):
-    t0 = time.time()
+# Bỏ response_model vì nó là StreamingResponse
+@router.post("/query")
+# Thêm Request để kiểm tra disconnect (nếu cần)
+async def query(req: QueryRequest, request: Request):
+    t_start_endpoint = time.perf_counter() # Đo thời gian tổng của endpoint
 
-    # ---- validate tối thiểu ----
+    # ---- Validate input (GIỮ NGUYÊN) ----
     q = (req.question or "").strip()
-    if not q:
-        raise HTTPException(status_code=400, detail="Question is required")
+    if not q: raise HTTPException(status_code=400, detail="Question is required")
     subj = (req.subject or "").strip().lower()
     cid  = (req.course_id or "").strip().lower()
-    if not subj:
-        raise HTTPException(status_code=400, detail="Subject is required")
-    if not cid:
-        raise HTTPException(status_code=400, detail="Course ID is required")
-
-    # ---- filters (chỉ chứa các khóa đã chuẩn hóa) ----
+    if not subj: raise HTTPException(status_code=400, detail="Subject is required")
+    if not cid: raise HTTPException(status_code=400, detail="Course ID is required")
     filters = {"subject": subj, "course_id": cid}
+    # top_k không cần truyền vào retrieve_answer nữa
+    # user_id = req.user_id # Lấy user_id nếu có
+    # ---------------------------------
 
-    # ---- clamp top_k an toàn ----
-    top_k = int(req.top_k or 5)
-    if top_k < 1: top_k = 1
-    if top_k > 20: top_k = 20
+    logging.info(f"⚡ Nhận yêu cầu: '{q[:50]}...' (Subj: {subj}, Course: {cid})")
 
     try:
-        # ✅ Gọi async RAG chain (per-subq/no-intent)
-        answer, docs = await retrieve_answer(
+        # --- Gọi hàm retrieve_answer đã sửa ---
+        # Nó trả về (async_generator, list_of_docs)
+        answer_generator, docs = await retrieve_answer(
             question=q,
-            subject=subj,           # truyền rõ ràng
-            course_id=cid,          # truyền rõ ràng
-            k=top_k,
+            subject=subj,
+            course_id=cid,
             filters=filters,
+            # k=top_k, # Không cần k ở đây nữa
+            # user_id=user_id # Truyền user_id nếu cần
         )
+        # ------------------------------------
 
-        # ---- Chuẩn hóa sources cho client ----
-        sources: List[ContextChunk] = []
-        for d in (docs or []):
-            meta = d.metadata or {}
-            text = (d.page_content or "")
-            sources.append(
-                ContextChunk(
-                    page=meta.get("page"),
-                    text=(text[:1000] + "...") if len(text) > 1000 else text,
-                )
-            )
+        # --- Chuẩn bị sources (NGAY LẬP TỨC) ---
+        # Chúng ta gửi sources SAU KHI stream text xong
+        sources_data: List[Dict] = []
+        if docs:
+             # In log sources nếu muốn debug
+             # dump_docs("Final Sources", docs)
+             for d in docs:
+                  meta = d.metadata or {}
+                  text = (d.page_content or "")
+                  # Chỉ lấy 300 ký tự đầu cho sources
+                  sources_data.append(
+                       ContextChunk(
+                            page=meta.get("page"),
+                            text=(text[:300] + "...") if len(text) > 300 else text,
+                            course_id=meta.get("course_id"),
+                            subject=meta.get("subject"),
+                            score=meta.get("rerank_score") # Lấy rerank score nếu có
+                       ).dict()
+                  )
+        # --------------------------------------
 
-        elapsed = int((time.time() - t0) * 1000)
-        return QueryResponse(answer=answer or "", sources=sources, elapsed_ms=elapsed)
+        # --- Định nghĩa Stream kết hợp Text và Metadata ---
+        async def combined_stream_generator():
+            full_answer_for_log = "" # Để log lại toàn bộ câu trả lời
+            try:
+                # 1. Stream phần text trả lời
+                async for token in answer_generator:
+                    # Kiểm tra client còn kết nối không
+                    if await request.is_disconnected():
+                         logging.warning("[Stream] Client disconnected during text stream.")
+                         break # Dừng gửi nếu client ngắt kết nối
+                    yield token
+                    full_answer_for_log += token
 
-    # ---- LLM quá tải (503) → trả 200 với fallback ngắn, tránh 500 ----
+                # 2. Gửi metadata (sources, elapsed) sau khi text kết thúc
+                # Dùng một ký tự đặc biệt hoặc cấu trúc JSON để client nhận biết
+                elapsed_total = int((time.perf_counter() - t_start_endpoint) * 1000)
+                metadata_payload = {
+                    "type": "metadata", # Đánh dấu đây là metadata
+                    "sources": sources_data,
+                    "elapsed_ms": elapsed_total
+                }
+                # Chuyển thành chuỗi JSON, thêm ký tự đặc biệt (ví dụ: null byte)
+                # Hoặc dùng Server-Sent Events (SSE) format nếu client hỗ trợ
+                metadata_str = "\n\n__METADATA__\n" + json.dumps(metadata_payload, ensure_ascii=False) + "\n__END_METADATA__\n"
+                if not await request.is_disconnected():
+                     yield metadata_str
+
+                logging.info(f"✅ Streaming thành công. Total Endpoint Time: {elapsed_total} ms.")
+                # Log câu trả lời đầy đủ (nếu cần)
+                # logging.info(f"[Stream] Full Answer Sent:\n{full_answer_for_log}")
+
+            except Exception as stream_exc:
+                 logging.exception("[Stream] Lỗi trong quá trình combined_stream_generator")
+                 # Gửi thông báo lỗi vào stream nếu có thể
+                 try:
+                      if not await request.is_disconnected():
+                           yield f"\n[Lỗi Stream: {stream_exc}]"
+                 except Exception: pass # Bỏ qua nếu không gửi được lỗi
+
+            finally:
+                 # Đảm bảo generator kết thúc sạch sẽ
+                 logging.debug("[Stream] combined_stream_generator finished.")
+
+        # --- Trả về StreamingResponse ---
+        # media_type có thể là 'text/plain; charset=utf-8' hoặc 'text/event-stream' (cho SSE)
+        return StreamingResponse(combined_stream_generator(), media_type="text/plain; charset=utf-8")
+        # --------------------------------
+
+    # --- Xử lý lỗi Endpoint (GIỮ NGUYÊN HOẶC SỬA ĐỂ STREAM LỖI) ---
     except (ServiceUnavailable, RpcError) as e:
         logging.error(f"[HTTP] LLM unavailable: {e}")
-        elapsed = int((time.time() - t0) * 1000)
-        # có thể trả câu ngắn gọn, tùy bạn muốn thông điệp hay để rỗng
-        return JSONResponse(
-            status_code=200,
-            content=QueryResponse(
-                answer="Hệ thống đang quá tải, mình đã trả phần có thể từ ngữ cảnh. Vui lòng thử lại.",
-                sources=[],
-                elapsed_ms=elapsed,
-            ).dict(),
-        )
+        # Có thể trả về stream lỗi thay vì JSONResponse
+        async def error_llm_stream():
+             yield "Hệ thống đang quá tải, vui lòng thử lại sau giây lát."
+             metadata_payload = {"type": "error", "detail": "LLM unavailable"}
+             yield "\n\n__METADATA__\n" + json.dumps(metadata_payload) + "\n__END_METADATA__\n"
+        return StreamingResponse(error_llm_stream(), status_code=503, media_type="text/plain; charset=utf-8")
 
-    # ---- Lỗi khác: log và trả 500 gọn ----
     except Exception as e:
-        logging.exception("[HTTP] Unhandled error in /query")
-        raise HTTPException(status_code=500, detail="internal_error")
+        logging.exception("[HTTP] Unhandled error in /query endpoint")
+        # Có thể trả về stream lỗi
+        async def error_unhandled_stream():
+             yield f"Lỗi hệ thống không xác định: {e}"
+             metadata_payload = {"type": "error", "detail": "internal_error"}
+             yield "\n\n__METADATA__\n" + json.dumps(metadata_payload) + "\n__END_METADATA__\n"
+        return StreamingResponse(error_unhandled_stream(), status_code=500, media_type="text/plain; charset=utf-8")
+    # --- Kết thúc xử lý lỗi ---

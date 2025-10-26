@@ -1,292 +1,263 @@
-# app/services/analyze_query.py
-# -*- coding: utf-8 -*-
-
-import json, time, logging, re
+import json
+import time
+import logging
+import re
 from typing import Any, Dict, List
 from ...infrastructure.llm.llm import get_llm
 from langchain_core.prompts import PromptTemplate
-RAW_ANALYZE_TMPL = r"""
-Trả về CHỈ MỘT JSON hợp lệ (không markdown, không giải thích) với các khóa SAU:
+# --- 1. DI CHUYỂN CÁC HÀM HELPER VÀ BIẾN `_ws` VÀO ĐÂY ---
+_ws = re.compile(r"\s+") # <-- Định nghĩa _ws ở đây
 
-- normalized_question (string)
-- question_type ("academic"|"meta"|"unclear"|"unsafe")
-- task_type ("single"|"comparison"|"multi_part")
-- sub_questions_with_intent (mảng các đối tượng: {"subq":"...","intent":["..."],"topic":"<ngắn gọn theo chính subq>"})
-- subq_variants (đối tượng map: {"<subq>": ["v1 short","v2 short"]}, mỗi subq trong subq_variants có 2 biến thể (1 tiếng Việt + 1 tiếng Anh), ngắn, không stopwords)
-
-QUY TẮC BẮT BUỘC:
-- Intent hợp lệ (enum, bắt buộc): 
-  ["definition","comparison","application","warning","exercise","paraphrase","socratic_question","example","quality","meta","toc","unsafe","unclear","router_fallback"].
-- Không phát minh intent ngoài danh sách. Nếu không chắc ≥80% → dùng "other".
-- Mọi intent phải gán ở CẤP SUB-QUESTION (mỗi subq có mảng intent riêng).
-- Mỗi sub question là tiếng Việt và phải có ý nghĩa cho truy vấn (không gộp nhiều câu thành 1 sub question, mỗi sub question phải là 1 ý) -> Tách câu hỏi user thành các sub-question nếu nó có nhiều ý, tự tạo sub question rõ nghĩa mà vẫn đúng ý user.
-- Nếu câu có nhiều mệnh đề cần tách (ngăn bởi dấu phẩy, chấm phẩy, xuống dòng, "và", "and") → tách thành NHIỀU sub_questions có ý nghĩa cho truy vấn, không gộp.
-- Nếu phát hiện yêu cầu Mục lục/TOC/Outline → tạo subq với intent=["toc"], topic="toc". CHỈ ép intent cho đúng subq TOC, không ép các subq khác.
-- Nếu phát hiện chào hỏi/giới thiệu hệ thống ("chào bạn", "bạn là ai", "who are you") → subq intent=["meta"], topic="meta".
-- Nếu phát hiện nội dung cấm/độc hại (ví dụ làm bom, hack, chất nổ, tự hại...) → subq intent=["unsafe"], topic="unsafe".
-- Không giới hạn cứng số sub_questions; nếu nhiều, liệt kê đầy đủ.
-- Nếu có “X vs Y” → topic = "X and Y".
-- Nếu “What is X?” → topic = "X".
-- Nếu SUB-QUESTION là chuỗi VÔ NGHĨA (token đơn chỉ chữ dài ≥10 và thiếu nguyên âm/tỉ lệ nguyên âm <25%, chủ yếu ký hiệu/emoji, lặp vô nghĩa, hoặc có phụ âm liền ≥4) → intent=["unclear"], topic="unclear".
-- CHỈ JSON hợp lệ.
-
-VÍ DỤ CHUẨN:
-
-# 1) TOC + academic (nhiều mệnh đề)
-Q: "mục lục của bài học, int là gì?"
-→ {
-  "normalized_question": "mục lục của bài học, int là gì?",
-  "question_type": "academic",
-  "task_type": "multi_part",
-  "sub_questions_with_intent": [
-    {"subq":"Mục lục của bài học?","intent":["toc"],"topic":"toc"},
-    {"subq":"What is int?","intent":["definition"],"topic":"int"}
-  ],
-  "subq_variants": {
-    "Mục lục của bài học?":["mục lục bài học","table of contents"],
-    "What is int?":["định nghĩa int","what is int"]
-  }
-}
-
-# 2) Meta + academic
-Q: "chào bạn, cho mình hỏi int là gì?"
-→ {
-  "normalized_question": "chào bạn, cho mình hỏi int là gì?",
-  "question_type": "academic",
-  "task_type": "multi_part",
-  "sub_questions_with_intent": [
-    {"subq":"Chào bạn?","intent":["meta"],"topic":"meta"},
-    {"subq":"What is int?","intent":["definition"],"topic":"int"}
-  ],
-  "subq_variants": {
-    "Chào bạn?":["chào bạn","hello"],
-    "What is int?":["định nghĩa int","what is int"]
-  }
-}
-
-# 3) Unsafe + academic
-Q: "cách làm bom và float là gì"
-→ {
-  "normalized_question": "cách làm bom và float là gì",
-  "question_type": "academic",
-  "task_type": "multi_part",
-  "sub_questions_with_intent": [
-    {"subq":"Cách làm bom?","intent":["unsafe"],"topic":"unsafe"},
-    {"subq":"What is float?","intent":["definition"],"topic":"float"}
-  ],
-  "subq_variants": {
-    "Cách làm bom?":["bom cách làm","make bomb"],
-    "What is float?":["định nghĩa float","what is float"]
-  }
-}
-
-# 4) Nhiều học thuật + so sánh
-Q: "int là gì, float là gì, so sánh int và float"
-→ {
-  "normalized_question": "int là gì, float là gì, so sánh int và float",
-  "question_type": "academic",
-  "task_type": "multi_part",
-  "sub_questions_with_intent": [
-    {"subq":"What is int?","intent":["definition"],"topic":"int"},
-    {"subq":"What is float?","intent":["definition"],"topic":"float"},
-    {"subq":"How do int and float differ?","intent":["comparison"],"topic":"int and float"}
-  ],
-  "subq_variants": {
-    "What is int?":["định nghĩa int","what is int"],
-    "What is float?":["định nghĩa float","what is float"],
-    "How do int and float differ?":["so sánh int và float","compare int float"]
-  }
-}
-
-# 5) Chỉ TOC đơn lẻ
-Q: "cho mình mục lục giáo trình"
-→ {
-  "normalized_question": "cho mình mục lục giáo trình",
-  "question_type": "academic",
-  "task_type": "single",
-  "sub_questions_with_intent": [
-    {"subq":"Mục lục giáo trình?","intent":["toc"],"topic":"toc"}
-  ],
-  "subq_variants": {
-    "Mục lục giáo trình?":["mục lục giáo trình","table of contents"]
-  }
-}
-
-# 6) Gibberish + academic + unsafe
-Q: "acsbsadcb, int là gì, cách làm bom"
-→ {
-  "normalized_question": "acsbsadcb, int là gì, cách làm bom",
-  "question_type": "academic",
-  "task_type": "multi_part",
-  "sub_questions_with_intent": [
-    {"subq":"acsbsadcb","intent":["unclear"],"topic":"unclear"},
-    {"subq":"What is int?","intent":["definition"],"topic":"int"},
-    {"subq":"Cách làm bom?","intent":["unsafe"],"topic":"unsafe"}
-  ],
-  "subq_variants": {
-    "acsbsadcb":["acsbsadcb","gibberish"],
-    "What is int?":["định nghĩa int","what is int"],
-    "Cách làm bom?":["bom cách làm","make bomb"]
-  }
-}
-
-# 7) Hai hành động khác nhau trong cùng chủ đề
-Q: "Đoạn nào đề cập về chủ đề int? Đưa rõ số trang."
-→ {
-  "normalized_question": "Đoạn nào đề cập về chủ đề int? Đưa rõ số trang.",
-  "question_type": "academic",
-  "task_type": "multi_part",
-  "sub_questions_with_intent": [
-    {"subq":"Đoạn nào đề cập về chủ đề int?","intent":["locate"],"topic":"int"},
-    {"subq":"Đưa rõ số trang nói về chủ đề int.","intent":["reference"],"topic":"int"}
-  ],
-  "subq_variants": {
-    "Đoạn nào đề cập về chủ đề int?":["đoạn đề cập về chủ đề int","where int mentioned"],
-    "Đưa rõ số trang nói về chủ đề int.":["số trang về chủ đề int","page numbers int"]
-  }
-}
-
-Now analyze this question:
-{question}
-"""
-
-# 🔒 Escape tất cả { } rồi khôi phục {question}
-SAFE_TMPL = (
-    RAW_ANALYZE_TMPL
-    .replace("{", "{{")
-    .replace("}", "}}")
-    .replace("{{question}}", "{question}")
-)
-
-ANALYZE_PROMPT = PromptTemplate.from_template(SAFE_TMPL)
-
-
-_ws = re.compile(r"\s+")
 def _norm(s: str) -> str:
+    """Hàm helper để chuẩn hóa khoảng trắng."""
     return _ws.sub(" ", (s or "").strip())
 
+def _looks_like_gibberish(s: str) -> bool:
+    """Hàm helper kiểm tra gibberish."""
+    t = (s or "").strip().lower()
+    t = _ws.sub(" ", t) # <-- Dùng _ws
+    if len(t) <= 3: return True
+    alnum = sum(ch.isalnum() for ch in t)
+    if alnum / max(1, len(t)) < 0.5: return True
+    words = re.findall(r"[a-zA-ZÀ-ỹ]{2,}", t)
+    if len(words) == 0: return True
+    return False
+
 def _to_list(x) -> List[str]:
+    """Hàm helper chuyển đổi sang list."""
     if x is None: return []
     if isinstance(x, list): return [str(i).strip() for i in x if str(i).strip()]
     if isinstance(x, str):  return [i.strip() for i in x.split(",") if i.strip()]
     return []
 
 def _to_map(x) -> Dict[str, List[str]]:
+    """Hàm helper chuyển đổi sang dict."""
+    return x if isinstance(x, dict) else {}
+# --- RAW_ANALYZE_TMPL V2 (Hierarchical) ---
+RAW_ANALYZE_TMPL = r"""
+Trả về CHỈ MỘT JSON hợp lệ (không markdown, không giải thích) với các khóa SAU:
+
+- normalized_question (string)
+- question_type ("academic"|"meta"|"unclear"|"unsafe")
+- task_type ("single"|"comparison"|"multi_part")
+- sub_questions_with_intent (mảng các đối tượng: {"subq":"<câu hỏi con gốc, đầy đủ>","intent":["<category>"],"topic":"<ngắn gọn>"})
+- subq_variants (map: {"<subq>": ["v1 short","v2 short"]})
+
+QUY TẮC BẮT BUỘC:
+- Intent hợp lệ (DANH MỤC, bắt buộc):
+  ["academic_rag", "lms_tools", "system_handlers"]
+- Mọi intent phải gán ở CẤP SUB-QUESTION.
+- Mỗi sub question phải là tiếng Việt và giữ NGUYÊN Ý GỐC của user. Tách câu hỏi user thành các sub-question nếu nó có nhiều ý.
+- Nếu câu có nhiều mệnh đề (phẩy, "và") → tách thành NHIỀU sub_questions.
+- "academic_rag": Bất kỳ câu hỏi nào cần TÌM KIẾM trong tài liệu học thuật (định nghĩa, so sánh, giải thích, ví dụ, tóm tắt, tìm số trang...).
+- "lms_tools": Bất kỳ câu hỏi nào về HỆ THỐNG LMS (bài tập về nhà, điểm số, lịch học...).
+- "system_handlers": Các câu hỏi về hệ thống (chào hỏi, meta, toc), câu hỏi không an toàn (unsafe) hoặc không rõ ràng (unclear).
+- CHỈ JSON hợp lệ.
+
+VÍ DỤ CHUẨN:
+
+# 1) Academic (RAG)
+Q: "int là gì?"
+→ {
+  "normalized_question": "int là gì?",
+  "question_type": "academic",
+  "task_type": "single",
+  "sub_questions_with_intent": [
+    {"subq":"int là gì?","intent":["academic_rag"],"topic":"int"}
+  ],
+  "subq_variants": { "int là gì?":["int là gì","what is int"] }
+}
+
+# 2) Academic (RAG) - Câu hỏi phụ thuộc (GIẢI QUYẾT VẤN ĐỀ CŨ)
+Q: "Đoạn nào đề cập về chủ đề int? Đưa rõ số trang."
+→ {
+  "normalized_question": "Đoạn nào đề cập về chủ đề int? Đưa rõ số trang.",
+  "question_type": "academic",
+  "task_type": "single",
+  "sub_questions_with_intent": [
+    {"subq":"Đoạn nào đề cập về chủ đề int? Đưa rõ số trang.","intent":["academic_rag"],"topic":"int page number"}
+  ],
+  "subq_variants": { "Đoạn nào đề cập về chủ đề int? Đưa rõ số trang.":["int số trang","int page number"] }
+}
+
+# 3) Academic (RAG) + System (meta)
+Q: "chào bạn, so sánh int và float"
+→ {
+  "normalized_question": "chào bạn, so sánh int và float",
+  "question_type": "academic",
+  "task_type": "multi_part",
+  "sub_questions_with_intent": [
+    {"subq":"chào bạn","intent":["system_handlers"],"topic":"meta"},
+    {"subq":"so sánh int và float","intent":["academic_rag"],"topic":"int and float"}
+  ],
+  "subq_variants": {
+    "chào bạn":["chào bạn","hello"],
+    "so sánh int và float":["so sánh int float","compare int float"]
+  }
+}
+
+# 4) Academic (RAG) + LMS (Tool)
+Q: "int là gì và bài tập về nhà tuần này?"
+→ {
+  "normalized_question": "int là gì và bài tập về nhà tuần này?",
+  "question_type": "academic",
+  "task_type": "multi_part",
+  "sub_questions_with_intent": [
+    {"subq":"int là gì?","intent":["academic_rag"],"topic":"int"},
+    {"subq":"Bài tập về nhà tuần này là gì?","intent":["lms_tools"],"topic":"lms_homework"}
+  ],
+  "subq_variants": {
+    "int là gì?":["int là gì","what is int"],
+    "Bài tập về nhà tuần này là gì?":["bài tập về nhà","homework this week"]
+  }
+}
+
+# 5) System (unsafe) + LMS (Tool)
+Q: "cách làm bom và điểm của tôi là bao nhiêu"
+→ {
+  "normalized_question": "cách làm bom và điểm của tôi là bao nhiêu",
+  "question_type": "academic", # question_type tổng vẫn có thể là academic
+  "task_type": "multi_part",
+  "sub_questions_with_intent": [
+    {"subq":"cách làm bom","intent":["system_handlers"],"topic":"unsafe"},
+    {"subq":"điểm của tôi là bao nhiêu","intent":["lms_tools"],"topic":"lms_grade"}
+  ],
+  "subq_variants": {
+    "cách làm bom":["làm bom","make bomb"],
+    "điểm của tôi là bao nhiêu":["điểm của tôi","my grade"]
+  }
+}
+
+Now analyze this question:
+{question}
+"""
+# --- KẾT THÚC RAW_ANALYZE_TMPL ---
+
+# Escape template
+SAFE_TMPL = (
+    RAW_ANALYZE_TMPL
+    .replace("{", "{{")
+    .replace("}", "}}")
+    .replace("{{question}}", "{question}")
+)
+ANALYZE_PROMPT = PromptTemplate.from_template(SAFE_TMPL)
+
+ws = re.compile(r"\s+")
+def _norm(s: str) -> str:
+    return _ws.sub(" ", (s or "").strip())
+
+def _to_list(x) -> List[str]:
+    # ... (Giữ nguyên)
+    if x is None: return []
+    if isinstance(x, list): return [str(i).strip() for i in x if str(i).strip()]
+    if isinstance(x, str):  return [i.strip() for i in x.split(",") if i.strip()]
+    return []
+
+
+def _to_map(x) -> Dict[str, List[str]]:
+    # ... (Giữ nguyên)
     return x if isinstance(x, dict) else {}
 
+# --- Hàm analyze chính ---
+# Sửa: Hàm này nhận `question` (str) thay vì `state` (dict)
 async def analyze_question(question: str) -> Dict[str, Any]:
-    print("✅ ENTERING ANALYZE FUNCTION")
-    t0 = time.time()
-    llm = get_llm()  # dùng model nhanh cho Analyze
+    """
+    Hàm cốt lõi: Gọi LLM để phân tích câu hỏi.
+    Chỉ trả về dictionary kết quả phân tích (data).
+    """
+    t_start = time.perf_counter() # Đo thời gian nội bộ của hàm này
+    print("      [analyze_question] 🧠 Bắt đầu gọi LLM...") # Thêm log
+
+    # Lấy LLM
+    llm = get_llm()
+
+    # Khởi tạo data fallback phòng trường hợp lỗi LLM
+    fallback_data = {
+        "normalized_question": question,
+        "question_type": "unclear",
+        "task_type": "single",
+        "sub_questions_with_intent": [{
+            "subq": question, "intent": ["system_handlers"], "topic": "unclear"
+        }],
+        "subq_variants": {question: [question]}
+    }
+    data: Dict[str, Any] = fallback_data # Gán fallback trước
 
     try:
         res = await llm.ainvoke(ANALYZE_PROMPT.format(question=question))
         text = getattr(res, "content", str(res)).strip()
-        text_clean = re.sub(r"^[^({\[]+", "", text)
-        match = re.search(r"\{[\s\S]*\}", text_clean)
+        # Logic trích xuất JSON (Giữ nguyên)
+        match = re.search(r"\{[\s\S]*\}", text)
         if not match:
-            raise ValueError("No JSON found")
-        data: Dict[str, Any] = json.loads(match.group(0))
-    except Exception as e:
-        logging.warning(f"[Analyze] Parse failed: {e}")
-        data = {
-            "normalized_question": question,
-            "question_type": "unclear",
-            "task_type": "single",
-            "intent": [],
-            "sub_questions_with_intent": [],
-            "subq_variants": {}
-        }
+            text_clean = re.sub(r"^[^({\[]+", "", text)
+            match = re.search(r"(\{[\s\S]*\}|\[[\s\S]*\])", text_clean)
+        if not match:
+             raise ValueError("No valid JSON found in LLM response")
+        json_str = match.group(0)
+        json_str = re.sub(r",\s*([}\]])", r"\1", json_str)
+        # Chỉ parse JSON, không gán fallback ở đây nữa
+        data = json.loads(json_str)
+        print(f"      [analyze_question] ✅ LLM trả về JSON thành công.")
 
-    # --- Normalize tối thiểu ---
+    except Exception as e:
+        print(f"      [analyze_question] 💥 Lỗi khi gọi LLM hoặc parse JSON: {e}")
+        # Nếu lỗi, `data` sẽ giữ nguyên giá trị fallback đã gán ở trên
+
+    # --- Normalize và Chuẩn hóa (Giữ nguyên logic xử lý `data`) ---
+    # (Copy toàn bộ logic chuẩn hóa data từ file cũ vào đây)
     data["normalized_question"] = _norm(data.get("normalized_question", question))
     data["question_type"] = (data.get("question_type") or "academic").lower()
     data["task_type"] = (data.get("task_type") or "single").lower()
 
-
-
-    # sub_questions_with_intent
     sqwi = data.get("sub_questions_with_intent") or []
     norm_sqwi = []
+    valid_intents = {"academic_rag", "lms_tools", "system_handlers"}
     if isinstance(sqwi, list):
         for item in sqwi:
-            subq = (item or {}).get("subq", "").strip()
+            if not isinstance(item, dict): continue
+            subq = _norm(item.get("subq", ""))
             it = item.get("intent", [])
             if isinstance(it, str): it = [it]
-            it = [str(x).strip().lower() for x in it if str(x).strip()]
-            topic = (item.get("topic") or "").strip()
+            intent_categories = [
+                str(x).lower().strip() for x in it
+                if str(x).lower().strip() in valid_intents
+            ]
+            if not intent_categories:
+                if data["question_type"] in ("meta", "unsafe", "unclear"):
+                     intent_categories = ["system_handlers"]
+                else:
+                     intent_categories = ["academic_rag"]
+            topic = _norm(item.get("topic", "")) or _norm(subq[:50])
             if subq:
                 norm_sqwi.append({
-                    "subq": subq,
-                    "intent": (it[:2] or ["definition"]),
-                    "topic": topic
+                    "subq": subq, "intent": intent_categories[:1], "topic": topic
                 })
+    if not norm_sqwi and question:
+         norm_sqwi = [{
+              "subq": question,
+              "intent": ["system_handlers" if data["question_type"] in ("meta", "unsafe", "unclear") else "academic_rag"],
+              "topic": "unclear" if data["question_type"] == "unclear" else _norm(question[:50])
+         }]
+    data["sub_questions_with_intent"] = norm_sqwi
 
-    data["sub_questions_with_intent"] = norm_sqwi  # ❗️không hardcap số subq
-
-    # subq_variants map (fallback 1 biến thể là chính subq nếu thiếu)
     sqv_in = _to_map(data.get("subq_variants"))
     sqv_out: Dict[str, List[str]] = {}
+    processed_subqs = set()
     for sqo in data["sub_questions_with_intent"]:
         sq = sqo["subq"]
+        if sq in processed_subqs: continue
+        processed_subqs.add(sq)
         variants = sqv_in.get(sq) or []
         if isinstance(variants, str): variants = [variants]
-        variants = [v.strip() for v in variants if v and v.strip()]
-        if not variants:
-            variants = [sq]  # fallback an toàn
-        sqv_out[sq] = variants[:2]  # tối đa 2, ngắn
+        variants = [_norm(v) for v in variants if v and _norm(v)]
+        if not variants: variants = [sq]
+        elif sq not in variants: variants.insert(0, sq)
+        sqv_out[sq] = list(dict.fromkeys(variants))[:2]
     data["subq_variants"] = sqv_out
+    # --- Kết thúc Normalize ---
 
-    # ✅ Fallback: nếu LLM không sinh subq → tạo 1 subq cho single
-    if not data.get("sub_questions_with_intent"):
-        nq = data["normalized_question"] or (question or "").strip()
-        if nq:
-            data["sub_questions_with_intent"] = [{
-                "subq": nq,
-                "intent": ["definition"],
-                "topic": ""
-            }]
-            data["subq_variants"] = {nq: [nq]}
+    duration = round((time.perf_counter() - t_start) * 1000)
+    print(f"      [analyze_question] ⏱️ Hoàn thành sau {duration} ms.")
 
-    # ===== Ensure every subq has at least one intent (default 'definition')
-    sq_list = data.get("sub_questions_with_intent") or []
-    fixed_sq = []
-    for it in sq_list:
-        subq = (it.get("subq") or "").strip()
-        intents_sq = it.get("intent") or []
-        if isinstance(intents_sq, str):
-            intents_sq = [intents_sq]
-        intents_sq = [str(x).lower().strip() for x in intents_sq if str(x).strip()]
-        if not intents_sq:
-            intents_sq = ["definition"]  # default
-        topic_sq = (it.get("topic") or "").strip()
-        fixed_sq.append({"subq": subq, "intent": intents_sq[:2], "topic": topic_sq})
-    data["sub_questions_with_intent"] = fixed_sq
-
-    # ===== Backstop TOC purely at subq-level (no root intent)
-    # Nếu câu hỏi/subq trông như TOC → ép intent subq = ["toc"], task_type = "single"
-    import unicodedata
-    def _strip_accents(s: str) -> str:
-        return "".join(c for c in unicodedata.normalize("NFD", s or "") if unicodedata.category(c) != "Mn")
-    def _looks_toc(s: str) -> bool:
-        kws = ("mục lục","muc luc","toc","table of contents","contents","outline","list of chapters")
-        s_l = (s or "").lower().strip()
-        s_no = _strip_accents(s_l)
-        return any(k in s_l for k in kws) or any(k in s_no for k in kws)
-
-    duration = round(time.time() - t0, 3)
-    logging.info(f"🧩 [Analyze] Done in {duration}s → subq={len(data['sub_questions_with_intent'])}")
-
-    status = data.get("question_type", "academic")
-    if status in ["unsafe","unclear","meta"]:
-        return {
-            "status": status,
-            "answer": (
-                "Xin lỗi, mình không thể hỗ trợ với nội dung này." if status=="unsafe" else
-                "Mình chưa hiểu rõ câu hỏi, bạn có thể nói cụ thể hơn không?" if status=="unclear" else
-                "Đây là câu hỏi dạng meta về hệ thống; sẽ trả lời ngắn gọn hoặc dừng pipeline."
-            ),
-            **data
-        }
-
-    return {"status": status, **data}
+    # --- SỬA RETURN: Chỉ trả về `data` dictionary ---
+    return data

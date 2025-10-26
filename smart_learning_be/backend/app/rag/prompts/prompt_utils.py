@@ -1,8 +1,12 @@
-# app/services/prompt_utils.py
 import os
 from langchain_core.prompts import PromptTemplate
-from typing import Union
+from typing import Union, List, Dict, Any # <-- Thêm Dict, Any
 from pathlib import Path
+import logging
+from ..rag_utils import build_context
+from langchain_core.documents import Document # <-- Thêm Document
+
+# --- Hàm load_prompt (Giữ nguyên) ---
 
 def load_prompt(path: str) -> str:
     base = Path(__file__).resolve().parent          # app/rag/prompts/
@@ -11,91 +15,93 @@ def load_prompt(path: str) -> str:
         p = base / p
     with p.open("r", encoding="utf-8") as f:
         return f.read()
-# ===========================
-# 🔁 Intent aliases (chuẩn hóa tên intent về file prompt)
-# ===========================
-INTENT_ALIASES = {
-    "compare": "comparison",
-    "problem": "exercise",
-    "summarize": "summary",
-    "summ": "summary",
-    "def": "definition",
-    "warn": "warning",
-    "socratic": "socratic_question",
-    "quiz": "quick_check",
-    "simplify": "paraphrase",
-    "router_fallback": "router_fallback",  # phòng khi router rơi vào fallback
-    "multi_part": "multi_part",
-}
+    
+# --- HÀM MỚI: BUILD PROMPT CÓ CẤU TRÚC ---
+def build_structured_prompt_block(
+    subject: str,
+    structured_context: List[Dict[str, Any]],  # mỗi item: {"kind":"system"| "academic", ...}
+    original_full_question: str,
+    doc_source: str = "Tài liệu học tập",
+) -> str:
+    """
+    Xây dựng prompt V4 theo thứ tự sub-question của user.
+    - system block: giữ nguyên TEXT-TO-INSERT (meta/unclear/unsafe/toc/…)
+    - academic block: cung cấp CONTEXT riêng cho từng sub
+    """
 
+    context_blocks: List[str] = []
+    sub_questions_list: List[str] = []
 
-PRIORITY = [
-  "definition","comparison","multi_part","application","example","warning",
-  "exercise","theory","summary","socratic_question","quick_check","paraphrase"
-]
+    if not structured_context:
+        logging.warning("[Prompt Builder] structured_context rỗng. Dùng prompt fallback.")
+        return f"""
+# 🎯 NHIỆM VỤ
+Trả lời câu hỏi sau một cách tốt nhất có thể:
+"{original_full_question}"
 
-def normalize_and_order_intents(intents: list[str]) -> list[str]:
-    # to lower + alias + unique (giữ thứ tự ưu tiên)
-    seen = set()
-    norm = []
-    for raw in intents:
-        i = (raw or "").lower().strip()
-        i = INTENT_ALIASES.get(i, i) or "general"
-        if i not in seen:
-            seen.add(i)
-            norm.append(i)
-    # order by PRIORITY; những intent lạ đưa về cuối
-    ordered = sorted(norm, key=lambda x: PRIORITY.index(x) if x in PRIORITY else 999)
-    return ordered
+# 📝 BẮT ĐẦU TRẢ LỜI:
+""".strip()
 
-def get_soft_hints(intents: list[str]) -> str:
-    if not intents:
-        return ""
+    # build từng block theo đúng thứ tự
+    for i, item in enumerate(structured_context):
+        kind = (item or {}).get("kind")  # 'system' | 'academic' | fallback
+        subq = item.get("subq", f"Phần {i+1}")
+        sub_questions_list.append(f"{i+1}. {subq}")
 
-    # alias + thứ tự ưu tiên (lấy tối đa 2 gợi ý đầu)
-    ALIAS = {
-        "compare": "comparison", "def": "definition", "summ": "summary",
-        "simplify": "paraphrase", "quiz": "quick_check"
-    }
-    PRIORITY = [
-        "comparison","definition","application","example","warning","summary",
-        "exercise","theory","quick_check","paraphrase","multi_part",
-        "socratic_question","toc","router_fallback","general"
-    ]
-    HINT = {
-    "comparison": "So sánh theo 2–3 trục cốt lõi; nêu điểm giống/khác ngắn gọn. Ví dụ (nếu có) phải trích từ NGỮ CẢNH.",
-    "definition": "Nêu định nghĩa. Nếu có hãy thêm các phần sau: 1-2 ví dụ đúng cùng loại, ứng dụng, Ngoài ra(nếu có) trích từ NGỮ CẢNH.",
-    "application": "Chỉ mô tả các bước/qui trình nếu NGỮ CẢNH có nêu; nếu không, tóm nguyên tắc áp dụng ngắn gọn.",
-    "example": "Chọn 1 ví dụ ngắn, đúng cùng loại với chủ đề, trích trực tiếp từ NGỮ CẢNH; không bịa thêm.",
-    "warning": "Chỉ cảnh báo nếu NGỮ CẢNH có nêu bẫy/ngoại lệ; trình bày ngắn gọn, rõ điều kiện xảy ra.",
-    "summary": "Kết thúc bằng TL;DR 1–2 câu, chỉ dùng ý từ NGỮ CẢNH.",
-    "exercise": "Nếu NGỮ CẢNH cho phép, đề xuất 1–3 bài tập siêu ngắn bám NGỮ CẢNH; kèm gợi ý/đáp án tóm tắt khi có.",
-    "theory": "Làm rõ nguyên lý/điều kiện áp dụng dựa trên NGỮ CẢNH; không suy diễn ngoài phạm vi.",
-    "quick_check": "Soạn 3–5 câu hỏi kiểm tra ngắn, trả lời được từ NGỮ CẢNH; cuối mục nêu đáp án ngắn gọn.",
-    "paraphrase": "Diễn đạt lại ý trong NGỮ CẢNH cho dễ hiểu, không thêm/giảm thông tin.",
-    "multi_part": "Sắp xếp: định nghĩa/cơ sở → so sánh/ứng dụng → lưu ý. Dùng câu nối; không lặp ý.",
-    "socratic_question": "Đặt 3–5 câu hỏi gợi mở từ cơ bản đến kết luận; mỗi câu phải trả lời được từ NGỮ CẢNH, không dẫn dắt ngoài phạm vi.",
-    "toc": "Nếu NGỮ CẢNH là mục lục, chỉ định vị đúng mục liên quan; không suy diễn nội dung.",
-    "router_fallback": "Nếu tín hiệu mơ hồ, ưu tiên nêu định nghĩa/ý chính bám NGỮ CẢNH, kèm TL;DR; tránh suy diễn.",
-    "general": "Ưu tiên ý chính ngắn gọn, có câu nối; chỉ trích thông tin trong NGỮ CẢNH.",
-    }
+        if kind == "system":
+            role = item.get("role")  # meta | unclear | unsafe | toc | ...
+            sys_text = (item.get("text") or "").strip()
+            context_blocks.append(f"""
+## Câu hỏi {i+1}: {subq}  (SYSTEM: {role})
+### TEXT-TO-INSERT (giữ nguyên, KHÔNG sửa)
+{sys_text if sys_text else "—"}
+""".strip())
 
+        elif kind == "academic":
+            docs = item.get("docs", [])
+            context_str_for_subq = build_context(docs) if docs else "Không có ngữ cảnh cụ thể được tìm thấy cho phần này."
+            context_blocks.append(f"""
+## Câu hỏi {i+1}: {subq}
+### CONTEXT (ONLY USE THIS)
+{context_str_for_subq}
+""".strip())
 
-    # normalize + de-dup
-    norm = []
-    seen = set()
-    for it in intents:
-        k = (it or "").lower().strip()
-        k = ALIAS.get(k, k)
-        if k and k not in seen:
-            seen.add(k)
-            norm.append(k)
+        else:
+            # fallback an toàn để không rơi block
+            context_blocks.append(f"""
+## Câu hỏi {i+1}: {subq}  (SYSTEM: unknown)
+### TEXT-TO-INSERT (giữ nguyên, KHÔNG sửa)
+—
+""".strip())
 
-    # order by PRIORITY rồi lấy tối đa 2 hint
-    norm.sort(key=lambda x: PRIORITY.index(x) if x in PRIORITY else 999)
-    hints = [HINT[i] for i in norm if i in HINT][:2]
-    return " ".join(hints)
+    full_context_section = "\n---\n".join(context_blocks)
+    all_sub_questions = "\n".join(sub_questions_list)
 
+    # ráp prompt cuối (vai trò, nhiệm vụ, quy tắc)
+    return f"""
+# 📘 NGỮ CẢNH CHI TIẾT (Tách theo Câu hỏi con)
+{full_context_section}
+
+---
+
+# 🎓 VAI TRÒ
+Bạn là trợ giảng môn {subject}. Đây là tên tài liệu {doc_source}. Hãy dùng tiếng Việt để trả lời.
+
+# 🎯 NHIỆM VỤ TỔNG HỢP
+Dựa **CHÍNH XÁC** vào **từng cặp** [Câu hỏi con] và [Ngữ cảnh/Insert tương ứng] ở trên, viết **MỘT câu trả lời DUY NHẤT** mạch lạc cho **tất cả** các câu hỏi sau, theo đúng thứ tự:
+{all_sub_questions}
+
+# 🧭 QUY TẮC BẮT BUỘC
+1) Với khối **SYSTEM**, phần **TEXT-TO-INSERT** phải được giữ nguyên, không chế thêm.
+2) Với khối **ACADEMIC**, CHỈ dùng **CONTEXT (ONLY USE THIS)** của đúng câu hỏi đó để trả lời.
+3) Toàn bộ câu trả lời phải liền mạch, giọng văn thống nhất (không rời rạc), theo thứ tự Q1→Qn.
+4) Gắn [D#-p#] ngay sau câu khi sử dụng dữ kiện trừ khối **SYSTEM** chỉ gắn cho **ACADEMIC**. Nếu thiếu context phù hợp → ghi đúng câu: "Tài liệu không đề cập gì về chủ đề này."
+5) Tuyệt đối không dùng thông tin ngoài context, không bịa. Cho phép suy luận hợp lí để cho câu trả lời không quá cụt ngủn dựa trên context.
+
+###Lưu ý: Câu trả lời cuối cùng phải mạch lạc, rõ ràng, có liên kết giữa các phần Q1->Qn, không rời rạc.
+
+# 📝 BẮT ĐẦU CÂU TRẢ LỜI TỔNG HỢP:
+""".strip()
 
 
 def build_unified_block(subject: str, context: str, question: str, topic: str, doc_source: str, soft_hints: str="") -> str:
@@ -112,11 +118,12 @@ Bạn là trợ giảng môn {subject}. Hãy dùng tiếng Việt để trả l�
 Giải thích "{question}" trong phạm vi {doc_source}, bám sát NGỮ CẢNH, viết mạch lạc.
 
 ĐẦU TIÊN VÀ QUAN TRỌNG:
-1. XÁC ĐỊNH CÂU HỎI {question} có liên quan đến ngữ cảnh đươc cung cấp không? 
+1. XÁC ĐỊNH CÂU HỎI {question} có liên quan đến ngữ cảnh được cung cấp không? 
 - Nếu có thì trả lời. 
 - Nếu không hoặc mơ hồ, không chắc chắn thì trả lời "Tài liệu không đề cập gì về chủ đề {question}."
 2. CÂU TRẢ LỜI PHẢI BẮT BUỘC PHẢI CÓ LIÊN QUAN TRỰC TIẾP 100% ĐẾN {question}.
 3. QUAN TRỌNG: CÂU HỎI - NGỮ CẢNH - CÂU TRẢ LỜI LÀ BỘ 3 LIÊN QUAN, LIÊN KẾT VỚI NHAU .
+4. Các mục "[D#-p#]" tương ứng là "D# là Document ID (Mã tài liệu) - p# là Page Number (Số trang)" trong NGỮ CẢNH.
 -> NGỮ CẢNH LIÊN QUAN ĐẾN CÂU HỎI - VÀ CÂU TRẢ LỜI PHẢI LIÊN QUAN VỚI CÂU HỎI.
 
 # 🧭 CÁCH LÀM (gợi ý mềm)
@@ -128,10 +135,10 @@ Giải thích "{question}" trong phạm vi {doc_source}, bám sát NGỮ CẢNH,
 
 # 🚫 RÀNG BUỘC
 - Chỉ dùng dữ kiện trong NGỮ CẢNH, không bịa, không dẫn ngoài.
+- Trích dẫn nguồn [D#-p#] nếu có trong đoạn NGỮ CẢNH bạn đang sử dụng để trả lời.
 - Không chào hỏi và nói các câu như "Chào bạn, dựa trên tài liệu, trong ngữ cảnh này,... các câu cứng nhắt" bởi vì nó không được hay như chatbot rag thực thụ.
-- Nếu thiếu dữ kiện, trả đúng câu: "Tài liệu không đề cập gì về chủ đề này."
+- CHỈ trả về câu "Tài liệu không đề cập gì về chủ đề này." KHI TOÀN BỘ NGỮ CẢNH HOÀN TOÀN KHÔNG CÓ THÔNG TIN LIÊN QUAN ĐẾN CÂU HỎI.
 - Văn phong rõ ràng, liền mạch; tránh liệt kê khô cứng.
-
 
 -> Quy tắc trích dẫn dẫn chứng: Khi dùng thông tin từ NGỮ CẢNH, gắn thẻ nguồn ngay sau câu theo tag [D#-p#] đúng như trong NGỮ CẢNH đc cung cấp. Không bịa số trang.
 """.strip()
@@ -154,16 +161,17 @@ RÀNG BUỘC:
 NGỮ CẢNH:
 {ctx}
 """.strip()
-
-
-SYSTEM_PROMPT = load_prompt("system_prompt.txt")
-APPENDIX = load_prompt("appendix_examples.txt")
-USE_APPENDIX = os.getenv("USE_APPENDIX", "false").lower() == "true"
-
-if USE_APPENDIX:
-    QA_PROMPT = PromptTemplate.from_template(SYSTEM_PROMPT + "\n\n" + APPENDIX)
-else:
+# --- CACHED_PROMPT (Giữ nguyên) ---
+try:
+    SYSTEM_PROMPT = load_prompt("system_prompt.txt")
+    # ... (code tạo CACHED_PROMPT giữ nguyên) ...
     QA_PROMPT = PromptTemplate.from_template(SYSTEM_PROMPT)
+    CACHED_PROMPT = QA_PROMPT.format(subject="General").strip()
+    logging.info("✅ Đã nạp system_prompt.txt")
+except Exception as e:
+     # ... (code fallback giữ nguyên) ...
+     logging.error(f"Lỗi khi nạp system_prompt.txt: {e}. Sử dụng prompt mặc định.")
+     SYSTEM_PROMPT = "# 🎓 VAI TRÒ\nBạn là trợ giảng AI..."
+     QA_PROMPT = PromptTemplate.from_template(SYSTEM_PROMPT)
+     CACHED_PROMPT = QA_PROMPT.format(subject="General").strip()
 
-# MỚI (trả về string đã fill sẵn): 
-CACHED_PROMPT = QA_PROMPT.format(subject="General").strip()  # <-- string
