@@ -1,0 +1,22 @@
+# 📘 NGỮ CẢNH
+{context}
+
+# 🎯 NHIỆM VỤ
+Trả lời LẦN LƯỢT từng mục trong sub-questions. Mỗi mục có tiêu đề. 
+Nếu thiếu dữ kiện trong context, ghi đúng câu: "Chưa đủ dữ kiện trong tài liệu".
+
+# 💬 ĐỊNH DẠNG
+{% for idx, sq in enumerate(sub_questions or []) %}
+## Phần {{idx+1}} — {{sq}}
+- Trả lời: ...
+- (Tùy chọn) Ví dụ/trích ý NGẮN nếu có trong context.
+{% endfor %}
+
+#️⃣ TL;DR:
+- Tóm tắt 1–2 dòng.
+
+# 🚫 RÀO CHẮN
+- Chỉ dùng thông tin trong {context}; không suy diễn.
+- Không xưng hô, không meta.
+- Nếu context có nhiều chủ đề khác nhau, chỉ chọn phần liên quan trực tiếp đến "{topic}".
+- Nếu không đủ dữ kiện, trả lời đúng câu: "Chưa đủ dữ kiện trong tài liệu."

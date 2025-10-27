@@ -1,0 +1,9 @@
+definition: prompts/intent_prompts/definition.txt
+comparison: prompts/intent_prompts/comparison.txt
+example: prompts/intent_prompts/example.txt
+application: prompts/intent_prompts/application.txt
+exercise: prompts/intent_prompts/exercise.txt
+property: prompts/intent_prompts/theory.txt
+summary: prompts/intent_prompts/summary.txt
+multi_part: prompts/intent_prompts/multi_part.txt
+fallback: prompts/intent_prompts/router_fallback.txt

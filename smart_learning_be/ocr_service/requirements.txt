@@ -1,0 +1,13 @@
+fastapi==0.115.*
+uvicorn[standard]==0.30.*
+paddleocr==2.9.*
+paddlepaddle-gpu==2.6.*
+easyocr==1.7.*
+pillow
+numpy<2.0
+pymupdf==1.24.*
+protobuf==3.20.2
+torch==2.3.0+cu121
+torchvision==0.18.0+cu121
+--extra-index-url https://download.pytorch.org/whl/cu121
+python-multipart

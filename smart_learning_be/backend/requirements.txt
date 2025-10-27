@@ -1,0 +1,57 @@
+# --- Core Web ---
+fastapi>=0.115.0,<0.116.0
+uvicorn[standard]>=0.30.0,<0.31.0
+python-dotenv
+requests
+python-multipart   # upload file
+
+# --- PDF & OCR ---
+pymupdf==1.24.*             # PyMuPDF
+pymupdf4llm                 # giữ layout khi convert
+pillow>=10.3.0,<11.0.0
+docling==2.*                # Docling core
+# Nếu bạn dùng PaddleOCR service riêng thì cài trong container OCR, không cài vào backend
+
+# --- Text Utils ---
+regex
+clean-text
+nltk
+
+# --- ML / Embedding / LLM ---
+numpy>=1.26,<2.1
+# Cài torch stack riêng bằng extra index-url
+torch==2.4.1+cu121 --index-url https://download.pytorch.org/whl/cu121
+torchvision==0.19.1+cu121 --index-url https://download.pytorch.org/whl/cu121
+torchaudio==2.4.1+cu121 --index-url https://download.pytorch.org/whl/cu121
+
+transformers>=4.56.2
+accelerate>=0.30.0
+sentence-transformers==3.*
+
+# --- LangChain ecosystem ---
+langchain==0.3.* 
+langchain-core==0.3.* 
+langgraph==0.3.*
+langchain-community==0.3.*
+langchain-text-splitters==0.3.*
+langsmith==0.3.*
+
+# --- Vector DB (Milvus) ---
+pymilvus==2.5.7
+langchain-milvus==0.2.1
+protobuf==5.27.2
+
+# --- Google GenAI (optional, nếu bạn dùng ChatGoogleGenerativeAI) ---
+langchain-google-genai==2.0.9
+langchain_ollama==0.3.10
+langchain-huggingface>=0.0.3
+google-generativeai==0.8.5
+google-ai-generativelanguage==0.6.15
+
+# --- Firebase (optional) ---
+firebase-admin
+
+# --- BM25 (sparse retriever) ---
+rank-bm25
+hf_transfer
+tiktoken

@@ -1,0 +1,20 @@
+# Bỏ venv cục bộ
+.venv
+__pycache__/
+*.log
+*.pyc
+*.pyo
+ocr_service/
+docker-compose.yml
+
+# Bỏ file hệ thống
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+
+# Bỏ data/model nặng (tải lại khi cần)
+data/
+datasets/
+checkpoints/
+models/
