@@ -7,7 +7,7 @@ from typing import Tuple, Any
 from ...services.meta.meta_responder import search_meta 
 from ...services.utils.toc_store import get_toc_by_key, get_toc_by_course, flatten_toc
 from ..prompts.prompt_utils import build_toc_validation_block
-from ...infrastructure.llm.llm_utils import sync_stream_generate
+from ...infrastructure.llm.llm_utils import async_stream_generate
 
 async def handle_system(sq: str, state: dict, topic: str) -> Tuple[str, str]:
     """
@@ -50,7 +50,7 @@ async def handle_system(sq: str, state: dict, topic: str) -> Tuple[str, str]:
             
             loop = asyncio.get_event_loop()
             with ThreadPoolExecutor() as pool:
-                ans = await loop.run_in_executor(pool, sync_stream_generate, prompt_text)
+                ans = await loop.run_in_executor(pool, andsync_stream_generate, prompt_text)
             print(f"      [SystemHandler] ✅ Xử lý TOC thành công.")
             return sq, ans
         except Exception as e:

@@ -1,21 +1,60 @@
 import logging
 import time
 import re
+import json # <-- Thêm json
 from typing import Any, Dict, List
-# 1. Sửa đường dẫn import cho đúng
-from ...rag.analysis.analyze_query import analyze_question # <-- Hàm cốt lõi
+# Import hàm cốt lõi và helper
+from ...rag.analysis.analyze_query import analyze_question, _looks_like_gibberish
+# Import utils
 from ...services.utils.toc_store import get_toc_by_course, get_toc_by_key, flatten_toc
-# Bỏ import sync_stream_generate nếu chỉ dùng trong _format_toc_with_llm
-# from ...infrastructure.llm.llm_utils import sync_stream_generate
 from ..prompts.prompt_utils import build_toc_validation_block
+# Import State và timing
 from ..rag_state import State, _update_timing
 
-# --- Các hàm Regex và Helper giữ nguyên ---
-_TOC_RX = re.compile(r"(\bmục lục\b|\bmuc luc\b|\btoc\b|...)", re.IGNORECASE) # Giữ nguyên
+# --- Regex TOC và Helpers ---
+# Mở rộng regex TOC
+_TOC_KWS = (
+    r"\bmục lục\b", r"\bmuc luc\b", r"\btoc\b",
+    r"\btable of contents\b", r"\bcontents\b",
+    r"\bdanh mục chương\b", r"\bcấu trúc chương\b",
+    r"\blist of chapters\b", r"\boutline\b",
+    r"\bmục lục (bài|bài học|bài giảng|giáo trình)\b"
+)
+_TOC_RX = re.compile("|".join(_TOC_KWS), re.IGNORECASE)
 _WS = re.compile(r"\s+")
-def _looks_like_gibberish(s: str) -> bool: ... # Giữ nguyên
-def _looks_like_toc_question(q: str) -> bool: ... # Giữ nguyên
-def _format_toc_with_llm(toc_lines: list[str]) -> str: ... # Giữ nguyên
+# Hàm _looks_like_gibberish đã được import từ analyze_query
+
+def _looks_like_toc_question(q: str) -> bool:
+    """Kiểm tra xem câu hỏi có phải là yêu cầu TOC không."""
+    q_norm = (q or "").strip().lower()
+    if not q_norm:
+        return False
+    # Kiểm tra độ dài để tránh câu dài vô tình chứa từ khóa
+    return len(q_norm) < 100 and bool(_TOC_RX.search(q_norm))
+
+def _format_toc_with_llm(toc_lines: list[str]) -> str:
+    """Gọi LLM (Sync) để xác thực và định dạng TOC."""
+    if not toc_lines:
+        return "Tài liệu này hiện không có thông tin mục lục."
+
+    prompt_text = build_toc_validation_block(toc_lines)
+    
+    # Import local để tránh circular dependency nếu llm_utils import ngược lại
+    try:
+        from ...infrastructure.llm.llm_utils import sync_stream_generate
+        # Dùng sync_stream_generate vì đây là hàm sync blocking
+        answer = sync_stream_generate(prompt_text)
+        # LLM có thể trả về câu lỗi nếu input không hợp lệ
+        if "mục lục tôi nhận được đang lỗi" in answer.lower():
+             logging.warning(f"[Analyze] LLM TOC Validator báo lỗi.")
+             return "Thông tin mục lục hiện đang được cập nhật, vui lòng thử lại sau."
+        return answer # Trả về TOC đã được LLM format
+    except ImportError:
+         logging.error("[Analyze] Không thể import sync_stream_generate cho _format_toc_with_llm.")
+         return "Lỗi: Không thể định dạng mục lục."
+    except Exception as e:
+         logging.exception(f"[Analyze] Lỗi khi gọi LLM format TOC: {e}")
+         return "Lỗi: Đã xảy ra sự cố khi lấy mục lục."
 # --- Kết thúc helpers ---
 
 # --- Node function `analyze` ---
@@ -26,111 +65,168 @@ async def analyze(state: State) -> State:
 
     question = (state.get("question") or "").strip()
 
-    # Xử lý câu hỏi rỗng (Giữ nguyên)
+    # Xử lý câu hỏi rỗng
     if not question:
-        # ... (Code xử lý câu hỏi rỗng giữ nguyên) ...
         print("  [Analyze] ⚠️ Câu hỏi rỗng.")
-        analyze_meta = {"question_type": "unclear", "status": "stop", "normalized_question": ""}
-        new_state = {**state, "answer": "Mình chưa hiểu câu hỏi của bạn.", "analyze_meta": analyze_meta}
+        analyze_meta = {
+            "question_type": "unclear", "status": "stop",
+            "normalized_question": "",
+            "sub_questions_with_intent": [{"subq": "", "intent": ["system_handlers"], "topic": "unclear"}]
+        }
+        new_state = {**state, "answer": "Mình chưa hiểu câu hỏi của bạn. Bạn có thể nói cụ thể hơn không?", "analyze_meta": analyze_meta}
         return _update_timing(new_state, "analyze", t_start)
 
-
-    # Xử lý TOC bằng Regex (Giữ nguyên)
+    # Xử lý TOC bằng Regex (Fast Path)
     if _looks_like_toc_question(question):
-        # ... (Code xử lý TOC Regex giữ nguyên) ...
         print(f"  [Analyze] ⚡ Phát hiện TOC bằng Regex cho: '{question[:50]}...'")
         try:
-            # ... (Lấy và format TOC) ...
             course_id = str(state.get("course_id") or "").strip()
-            entry = get_toc_by_course(course_id)
+            # doc_key = state.get("doc_key") # Tạm thời chưa dùng
+            entry = get_toc_by_course(course_id) # Chỉ dùng course_id
             toc_lines = flatten_toc(entry)
-            answer = _format_toc_with_llm(toc_lines)
+            answer = _format_toc_with_llm(toc_lines) # Gọi hàm sync
+
             analyze_meta = {
-                "status": "stop", "question_type": "academic", "task_type": "single",
+                "status": "stop", # Dừng pipeline
+                "question_type": "academic",
+                "task_type": "single",
                 "normalized_question": question,
                 "sub_questions_with_intent": [{"subq": question, "intent": ["system_handlers"], "topic": "toc"}],
-                "subq_variants": {question: ["mục lục", "table of contents"]}
             }
             new_state = {**state, "answer": answer, "analyze_meta": analyze_meta}
             print(f"✅ [Node] analyze: Xử lý TOC bằng Regex xong.")
             return _update_timing(new_state, "analyze", t_start)
         except Exception as e:
-            print(f"  [Analyze] 💥 Lỗi khi xử lý TOC Regex: {e}")
-            # Tiếp tục chạy LLM
+            print(f"  [Analyze] 💥 Lỗi xử lý TOC Regex: {e}. Tiếp tục LLM analyze...")
+            # Không return, để LLM analyze xử lý tiếp
 
-    # ===== SỬA CHỖ GỌI LLM Analyze =====
+    # ===== GỌI LLM Analyze (Hàm analyze_question) =====
     print(f"  [Analyze] 🧠 Gọi hàm analyze_question cho: '{question[:50]}...'")
     result_meta: Dict[str, Any] = {} # Khởi tạo dict rỗng
     try:
-        # TRUYỀN `question` (string) vào hàm `analyze_question`
-        result_meta = await analyze_question(question) # <-- Sửa ở đây
+        result_meta = await analyze_question(question) # Gọi hàm cốt lõi
+
+        # --- LOG DEBUG CHI TIẾT `result_meta` ---
+        print("\n--- DEBUG: Raw result_meta from analyze_question ---")
+        try:
+            print(json.dumps(result_meta, indent=2, ensure_ascii=False, default=str))
+        except Exception as json_dump_err:
+            print(f"  (Lỗi khi dump JSON result_meta: {json_dump_err})")
+            print(f"  Raw value: {result_meta}")
+        print("----------------------------------------------------\n")
+        # --- KẾT THÚC LOG DEBUG ---
+
+        if not isinstance(result_meta, dict) or not result_meta:
+             print(f"  [Analyze] 💥 Lỗi: analyze_question trả về kiểu không hợp lệ: {type(result_meta)}")
+             raise ValueError("analyze_question did not return a valid dictionary.")
 
     except Exception as e:
-         print(f"  [Analyze] 💥 Lỗi nghiêm trọng khi gọi analyze_question: {e}")
-         # Tạo fallback meta nếu analyze_question lỗi
+         print(f"  [Analyze] 💥 Lỗi nghiêm trọng khi gọi/xử lý analyze_question: {e}")
+         logging.exception("Error during analyze_question call/processing")
+         # Tạo fallback
          result_meta = {
              "normalized_question": question, "question_type": "unclear", "task_type": "single",
              "status": "stop", # Dừng lại nếu analyze lỗi
              "sub_questions_with_intent": [{"subq": question, "intent": ["system_handlers"], "topic": "unclear"}],
-             "subq_variants": {question: [question]}
          }
          state["answer"] = "Lỗi: Đã xảy ra sự cố khi phân tích câu hỏi của bạn."
-         # Gán fallback vào state và dừng
          new_state = {**state, "analyze_meta": result_meta}
          return _update_timing(new_state, "analyze", t_start)
 
-    # ----- Xử lý kết quả `result_meta` (Giữ nguyên logic) -----
-    # Ép gibberish thành unclear topic (Giữ nguyên)
-    sqwi = result_meta.get("sub_questions_with_intent", [])
+    # ----- Xử lý kết quả `result_meta` (Logic an toàn) -----
+    print("  [Analyze] ⚙️ Bắt đầu xử lý kết quả từ LLM analyze...")
     sqwi_fix = []
     has_gibberish = False
-    for item in sqwi:
-         subq = item.get("subq", "")
-         intent = item.get("intent", ["unknown"])[0]
-         topic = item.get("topic", "")
-         if _looks_like_gibberish(subq):
-             print(f"  [Analyze] Phát hiện Gibberish: '{subq[:30]}...' -> Đổi thành system_handlers/unclear")
-             intent = "system_handlers"
-             topic = "unclear"
-             has_gibberish = True
-         sqwi_fix.append({"subq": subq, "intent": [intent], "topic": topic})
-    result_meta["sub_questions_with_intent"] = sqwi_fix # Cập nhật lại meta
+    sqwi = result_meta.get("sub_questions_with_intent", [])
+    current_question_type = result_meta.get("question_type", "academic") # Lấy type từ LLM
 
-    # Xác định trạng thái cuối cùng (Giữ nguyên)
-    final_status = "academic"
-    all_intents = set(item["intent"][0] for item in sqwi_fix if item.get("intent"))
-    all_topics = set(item.get("topic") for item in sqwi_fix if item.get("topic"))
-    if "system_handlers" in all_intents:
-        if "unsafe" in all_topics: final_status = "unsafe"
-        elif "unclear" in all_topics: final_status = "unclear"
-        elif all(item["intent"][0] == "system_handlers" and item["topic"] in ("meta", "toc") for item in sqwi_fix):
-             final_status = "meta_or_toc_only"
-    result_meta["status"] = final_status # Lưu trạng thái
+    if isinstance(sqwi, list):
+        for item in sqwi:
+             if not isinstance(item, dict) or not item:
+                  print(f"    [Analyze] ⚠️ Bỏ qua item không hợp lệ: {item}")
+                  continue
 
-    # Xử lý dừng sớm (Giữ nguyên)
-    if final_status == "unsafe":
-        print("  [Analyze] ⚠️ Phát hiện nội dung không an toàn (sẽ xử lý qua SYSTEM block).")
-        result_meta["status"] = "continue"   # ⬅️ không stop, không gán answer
-        # KHÔNG return ở đây
+             subq = item.get("subq", "")
+             # Xử lý intent an toàn
+             intent_list = item.get("intent")
+             intent = "academic_rag" # Mặc định
+             raw_intent_value = None
+             if isinstance(intent_list, list) and intent_list:
+                  raw_intent_value = str(intent_list[0]).lower().strip()
+             elif isinstance(intent_list, str) and intent_list.strip():
+                  raw_intent_value = intent_list.lower().strip()
 
-    if final_status == "unclear" or (has_gibberish and len(sqwi_fix) == 1):
-        print("  [Analyze] ⚠️ Câu hỏi không rõ ràng (sẽ xử lý qua SYSTEM block).")
-        result_meta["status"] = "continue"   # ⬅️ không stop, không gán answer
-        # KHÔNG return ở đây
+             valid_intents = {"academic_rag", "lms_tools", "system_handlers"}
+             if raw_intent_value in valid_intents:
+                  intent = raw_intent_value
+             elif raw_intent_value: # Có giá trị nhưng không hợp lệ
+                  print(f"    [Analyze] ⚠️ Intent không hợp lệ '{raw_intent_value}', fallback sang academic_rag.")
+                  # intent = "academic_rag" (Đã là mặc định)
+             # else: (Nếu None hoặc list rỗng) intent = "academic_rag"
 
-    if final_status == "meta_or_toc_only":
-         print(f"  [Analyze] ⚡ Câu hỏi chỉ chứa Meta/TOC.")
-         result_meta["status"] = "continue" # Để dispatcher xử lý
+             topic = item.get("topic", "")
 
-    # ===== Mặc định: Tiếp tục pipeline =====
-    print(f"✅ [Node] analyze: Phân tích xong. Trạng thái: {final_status}")
-    # Gán meta vào state
+             # Kiểm tra Gibberish
+             try:
+                 if _looks_like_gibberish(subq):
+                    print(f"    [Analyze] Phát hiện Gibberish: '{subq[:30]}...' -> Đổi thành system/unclear")
+                    intent = "system_handlers"
+                    topic = "unclear"
+                    has_gibberish = True
+                    current_question_type = "unclear"
+             except NameError: pass # Bỏ qua nếu hàm chưa import (dù đã import ở trên)
+             except Exception as gib_err:
+                  print(f"    [Analyze] 💥 Lỗi kiểm tra gibberish: {gib_err}")
+
+             if topic == "unsafe": # Cập nhật type nếu unsafe
+                  current_question_type = "unsafe"
+
+             if subq:
+                  sqwi_fix.append({"subq": subq, "intent": [intent], "topic": topic})
+             else:
+                  print(f"    [Analyze] ⚠️ Bỏ qua sub-question rỗng.")
+
+    else: # sqwi không phải list
+        print(f"  [Analyze] ⚠️ 'sub_questions_with_intent' không phải list: {sqwi}")
+        if question:
+             sqwi_fix = [{"subq": question, "intent": ["system_handlers"], "topic": "unclear"}]
+             current_question_type = "unclear"; has_gibberish = True
+
+    # Cập nhật meta
+    result_meta["sub_questions_with_intent"] = sqwi_fix
+    result_meta["has_gibberish_subq"] = has_gibberish
+    result_meta["question_type"] = current_question_type
+
+    # Xác định trạng thái cuối cùng
+    final_status = "continue" # Mặc định tiếp tục
+    has_non_system_intent = any(
+        (item.get("intent") or [""])[0] not in ("system_handlers", "unknown")
+        for item in sqwi_fix
+    )
+
+    if current_question_type == "unsafe" and not has_non_system_intent:
+         final_status = "stop"; state["answer"] = "Xin lỗi, mình không thể hỗ trợ với nội dung này."
+         print(f"  [Analyze] ⚠️ TOÀN BỘ unsafe. Dừng pipeline.")
+    elif current_question_type == "unclear" and not has_non_system_intent:
+         final_status = "stop"; state["answer"] = "Mình chưa hiểu rõ câu hỏi, bạn có thể nói cụ thể hơn?"
+         print(f"  [Analyze] ⚠️ TOÀN BỘ unclear. Dừng pipeline.")
+    elif current_question_type == "meta" and not has_non_system_intent:
+         print(f"  [Analyze] ⚡ Câu hỏi chỉ chứa Meta (sẽ được dispatcher xử lý).")
+         # final_status = "continue" (Đã là mặc định)
+    elif any(item.get("topic") == "toc" for item in sqwi_fix) and not has_non_system_intent:
+         print(f"  [Analyze] ⚡ Câu hỏi chỉ chứa TOC (sẽ được dispatcher xử lý).")
+         # final_status = "continue" (Đã là mặc định)
+
+    result_meta["status"] = final_status
+
+    # ===== Trả về State =====
+    print(f"✅ [Node] analyze: Phân tích xong. Trạng thái cuối: {final_status}")
     new_state = {
         **state,
         "question_user": question,
         "question_norm": result_meta.get("normalized_question", question),
-        # Đảm bảo gán đúng dict kết quả vào key "analyze_meta"
         "analyze_meta": result_meta,
+        # Gán answer CHỈ KHI status là stop
+        "answer": state.get("answer") if final_status == "stop" else None
     }
     return _update_timing(new_state, "analyze", t_start)
-

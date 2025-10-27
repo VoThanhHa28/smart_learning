@@ -1,20 +1,73 @@
-# Bỏ venv cục bộ
+# Python virtual environment
 .venv
+venv
+env
+*.venv
+
+# Python cache files
 __pycache__/
-*.log
 *.pyc
 *.pyo
-ocr_service/
-docker-compose.yml
+*.pyd
 
-# Bỏ file hệ thống
-*.log
-*.tmp
+# Build artifacts
+build/
+dist/
+*.egg-info/
+*.so
+*.o
+
+# OS generated files
 .DS_Store
 Thumbs.db
 
-# Bỏ data/model nặng (tải lại khi cần)
+# IDE/Editor specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Git files
+.git/
+.gitignore
+.gitattributes
+
+# Test files (optional, keep if needed in image for testing)
+# tests/
+# *.test.py
+# pytest.ini
+# .pytest_cache/
+
+# Config files with secrets (should use env vars or secrets management)
+# .env # Be careful not to commit secrets to git either!
+
+# Cache folders
+.cache/
+*.cache
+
+# Log files
+*.log
+logs/
+
+# Large data/model files (should be mounted or downloaded at runtime)
 data/
 datasets/
-checkpoints/
 models/
+checkpoints/
+*.pt
+*.pth
+*.onnx
+*.safetensors
+*.bin
+
+# Temporary files
+*.tmp
+*.bak
+
+# Docker specific
+Dockerfile*
+docker-compose*
+
+# Notebooks (optional)
+*.ipynb
+.ipynb_checkpoints/

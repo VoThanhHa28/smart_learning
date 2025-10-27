@@ -1,5 +1,6 @@
 import logging
 import os
+import asyncio
 from dotenv import load_dotenv
 from fastapi import FastAPI
 
@@ -11,8 +12,8 @@ logging.info("Đã gỡ HF_TOKEN (nếu có) để tránh lỗi đăng nhập.")
 
 # --- IMPORT SAU KHI DỌN DẸP ---
 from app.api.routers import index, query
-from .infrastructure.llm.llm import warmup_llm
-from .infrastructure.llm.embedding import warmup_embeddings  # ✅
+from .infrastructure.llm.llm import warmup_llm, warmup_llm_async
+from .infrastructure.llm.embedding import warmup_embeddings
 from .rag.retrieval.vectorstore import warmup_vectorstore
 from .rag.rag_graph import warmup_rag
 from .services.lms.lms_router import initialize_lms_retriever
@@ -30,8 +31,9 @@ async def _startup():
 
     # ⚡ Warmup theo thứ tự: vectorstore → LLM → embeddings → RAG graph → LMS tools
     warmup_vectorstore()      # connect + load collection
-    warmup_llm()              # ping 1 câu cho LLM
-    warmup_embeddings()       # ✅ materialize + cache embedder (ưu tiên GPU khi encode)
+    warmup_embeddings()       # materialize + cache embedder
+    warmup_llm()              # sync warmup
+    await warmup_llm_async()  # async warmup để preload ainvoke/astream
     await warmup_rag()        # preload reranker, etc.
     initialize_lms_retriever()
 
