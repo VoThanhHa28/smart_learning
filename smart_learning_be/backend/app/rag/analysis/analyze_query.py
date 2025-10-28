@@ -36,22 +36,20 @@ def _to_map(x) -> Dict[str, List[str]]:
 # --- RAW_ANALYZE_TMPL V2 (Hierarchical) ---
 RAW_ANALYZE_TMPL = r"""
 Trả về CHỈ MỘT JSON hợp lệ (không markdown, không giải thích) với các khóa SAU:
-
 - normalized_question (string)
-- question_type ("academic"|"meta"|"unclear"|"unsafe")
+- question_type ("academic"|"meta"|"unsafe")
 - task_type ("single"|"comparison"|"multi_part")
 - sub_questions_with_intent (mảng các đối tượng: {"subq":"<câu hỏi con gốc, đầy đủ>","intent":["<category>"],"topic":"<ngắn gọn>"})
-- subq_variants (map: {"<subq>": ["v1 short","v2 short"]})
 
 QUY TẮC BẮT BUỘC:
 - Intent hợp lệ (DANH MỤC, bắt buộc):
   ["academic_rag", "lms_tools", "system_handlers"]
 - Mọi intent phải gán ở CẤP SUB-QUESTION.
-- Mỗi sub question phải là tiếng Việt và giữ NGUYÊN Ý GỐC của user. Tách câu hỏi user thành các sub-question nếu nó có nhiều ý.
-- Nếu câu có nhiều mệnh đề (phẩy, "và") → tách thành NHIỀU sub_questions.
-- "academic_rag": Bất kỳ câu hỏi nào cần TÌM KIẾM trong tài liệu học thuật (định nghĩa, so sánh, giải thích, ví dụ, tóm tắt, tìm số trang...).
+- Mỗi sub question phải là tiếng Việt và giữ NGUYÊN Ý GỐC của user.
+- "academic_rag": Bất kỳ câu hỏi nào cần TÌM KIẾM trong tài liệu học thuật (định nghĩa, so sánh, giải thích, ví dụ, tóm tắt, tìm số trang, kể cả các chủ đề chung chung như 'tìm hiểu bản thân').
 - "lms_tools": Bất kỳ câu hỏi nào về HỆ THỐNG LMS (bài tập về nhà, điểm số, lịch học...).
-- "system_handlers": Các câu hỏi về hệ thống (chào hỏi, meta, toc), câu hỏi không an toàn (unsafe) hoặc không rõ ràng (unclear).
+- "system_handlers": Các câu hỏi về hệ thống (chào hỏi, meta, toc), hoặc câu hỏi không an toàn (unsafe).
+- **KHÔNG** được gán intent là "system_handlers" với topic "unclear". Nếu câu hỏi vô nghĩa (gibberish), hãy gán nó là "academic_rag" với topic "gibberish".
 - CHỈ JSON hợp lệ.
 
 VÍ DỤ CHUẨN:
@@ -64,11 +62,10 @@ Q: "int là gì?"
   "task_type": "single",
   "sub_questions_with_intent": [
     {"subq":"int là gì?","intent":["academic_rag"],"topic":"int"}
-  ],
-  "subq_variants": { "int là gì?":["int là gì","what is int"] }
+  ]
 }
 
-# 2) Academic (RAG) - Câu hỏi phụ thuộc (GIẢI QUYẾT VẤN ĐỀ CŨ)
+# 2) Academic (RAG) - Câu hỏi phụ thuộc
 Q: "Đoạn nào đề cập về chủ đề int? Đưa rõ số trang."
 → {
   "normalized_question": "Đoạn nào đề cập về chủ đề int? Đưa rõ số trang.",
@@ -76,8 +73,7 @@ Q: "Đoạn nào đề cập về chủ đề int? Đưa rõ số trang."
   "task_type": "single",
   "sub_questions_with_intent": [
     {"subq":"Đoạn nào đề cập về chủ đề int? Đưa rõ số trang.","intent":["academic_rag"],"topic":"int page number"}
-  ],
-  "subq_variants": { "Đoạn nào đề cập về chủ đề int? Đưa rõ số trang.":["int số trang","int page number"] }
+  ]
 }
 
 # 3) Academic (RAG) + System (meta)
@@ -89,11 +85,7 @@ Q: "chào bạn, so sánh int và float"
   "sub_questions_with_intent": [
     {"subq":"chào bạn","intent":["system_handlers"],"topic":"meta"},
     {"subq":"so sánh int và float","intent":["academic_rag"],"topic":"int and float"}
-  ],
-  "subq_variants": {
-    "chào bạn":["chào bạn","hello"],
-    "so sánh int và float":["so sánh int float","compare int float"]
-  }
+  ]
 }
 
 # 4) Academic (RAG) + LMS (Tool)
@@ -105,27 +97,41 @@ Q: "int là gì và bài tập về nhà tuần này?"
   "sub_questions_with_intent": [
     {"subq":"int là gì?","intent":["academic_rag"],"topic":"int"},
     {"subq":"Bài tập về nhà tuần này là gì?","intent":["lms_tools"],"topic":"lms_homework"}
-  ],
-  "subq_variants": {
-    "int là gì?":["int là gì","what is int"],
-    "Bài tập về nhà tuần này là gì?":["bài tập về nhà","homework this week"]
-  }
+  ]
 }
 
 # 5) System (unsafe) + LMS (Tool)
 Q: "cách làm bom và điểm của tôi là bao nhiêu"
 → {
   "normalized_question": "cách làm bom và điểm của tôi là bao nhiêu",
-  "question_type": "academic", # question_type tổng vẫn có thể là academic
+  "question_type": "academic",
   "task_type": "multi_part",
   "sub_questions_with_intent": [
     {"subq":"cách làm bom","intent":["system_handlers"],"topic":"unsafe"},
     {"subq":"điểm của tôi là bao nhiêu","intent":["lms_tools"],"topic":"lms_grade"}
-  ],
-  "subq_variants": {
-    "cách làm bom":["làm bom","make bomb"],
-    "điểm của tôi là bao nhiêu":["điểm của tôi","my grade"]
-  }
+  ]
+}
+
+# 6) Academic (RAG) - Câu hỏi chung chung
+Q: "tìm hiểu bản thân"
+→ {
+  "normalized_question": "tìm hiểu bản thân",
+  "question_type": "academic",
+  "task_type": "single",
+  "sub_questions_with_intent": [
+    {"subq":"tìm hiểu bản thân","intent":["academic_rag"],"topic":"tìm hiểu bản thân"}
+  ]
+}
+
+# 7) Gibberish (Vô nghĩa)
+Q: "asdfg zxcvb"
+→ {
+  "normalized_question": "asdfg zxcvb",
+  "question_type": "academic",
+  "task_type": "single",
+  "sub_questions_with_intent": [
+    {"subq":"asdfg zxcvb","intent":["academic_rag"],"topic":"gibberish"}
+  ]
 }
 
 Now analyze this question:

@@ -1,31 +1,57 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:firebase_ui_auth/firebase_ui_auth.dart' as fui;
-import 'package:go_router/go_router.dart';
-import 'package:firebase_auth/firebase_auth.dart' as fa show FirebaseAuth;
+import 'package:smart_learning/features/auth/presentation/login_screen.dart';
+import 'package:smart_learning/screens/home_screen.dart';
+import 'package:smart_learning/screens/upload_screen.dart';
 
 class AuthGate extends StatelessWidget {
   const AuthGate({super.key});
+
   @override
   Widget build(BuildContext context) {
     return StreamBuilder<User?>(
-      stream: fa.FirebaseAuth.instance.authStateChanges(),
-      builder: (context, snap) {
-        if (snap.connectionState == ConnectionState.waiting) {
-          return const Scaffold(body: Center(child: CircularProgressIndicator()));
+      stream: FirebaseAuth.instance.authStateChanges(),
+      builder: (context, snapshot) {
+        // Đang kiểm tra trạng thái auth
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Scaffold(
+            body: Center(
+              child: CircularProgressIndicator(),
+            ),
+          );
         }
-        if (snap.hasData) {
-          Future.microtask(() => context.go('/library'));
-          return const SizedBox.shrink();
+
+        // Nếu có lỗi
+        if (snapshot.hasError) {
+          return Scaffold(
+            body: Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Icon(
+                    Icons.error_outline,
+                    color: Colors.red,
+                    size: 60,
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    'Lỗi xác thực: ${snapshot.error}',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: Colors.red),
+                  ),
+                ],
+              ),
+            ),
+          );
         }
-        return fui.SignInScreen(
-          providers: [fui.EmailAuthProvider()],
-          headerBuilder: (context, _, __) => const Padding(
-            padding: EdgeInsets.all(16),
-            child: Text('Welcome to Smart Learning',
-                style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
-          ),
-        );
+
+        // Đã đăng nhập -> chuyển đến UploadScreen
+        if (snapshot.hasData && snapshot.data != null) {
+          return const HomeScreen();
+        }
+
+        // Chưa đăng nhập -> chuyển đến LoginScreen
+        return const LoginScreen();
       },
     );
   }

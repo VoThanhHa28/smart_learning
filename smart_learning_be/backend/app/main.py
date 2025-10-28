@@ -2,6 +2,7 @@ import logging
 import os
 from dotenv import load_dotenv
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 # --- DỌN DẸP MÔI TRƯỜNG TRƯỚC KHI IMPORT MODEL ---
 os.environ["HF_HUB_DISABLE_IMPLICIT_TOKEN"] = "1"
@@ -23,6 +24,21 @@ logging.basicConfig(
 )
 
 app = FastAPI(title="Smart Learning API", version="0.1.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:5000",
+        "http://localhost:8080",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:5000",
+        "http://127.0.0.1:8080",
+        "*"  # Cho phép tất cả (chỉ dùng khi dev)
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.on_event("startup")
 async def _startup():

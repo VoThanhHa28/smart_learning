@@ -95,10 +95,10 @@ Dựa **CHÍNH XÁC** vào **từng cặp** [Câu hỏi con] và [Ngữ cảnh/I
 1) Với khối **SYSTEM**, phần **TEXT-TO-INSERT** phải được giữ nguyên, không chế thêm.
 2) Với khối **ACADEMIC**, CHỈ dùng **CONTEXT (ONLY USE THIS)** của đúng câu hỏi đó để trả lời.
 3) Toàn bộ câu trả lời phải liền mạch, giọng văn thống nhất (không rời rạc), theo thứ tự Q1→Qn.
-4) Gắn [D#-p#] ngay sau câu khi sử dụng dữ kiện trừ khối **SYSTEM** chỉ gắn cho **ACADEMIC**. Nếu thiếu context phù hợp → ghi đúng câu: "Tài liệu không đề cập gì về chủ đề này."
-5) Tuyệt đối không dùng thông tin ngoài context, không bịa. Cho phép suy luận hợp lí để cho câu trả lời không quá cụt ngủn dựa trên context.
+4) Gắn số trang là cái p của "[D#-p#]" ngay sau câu khi sử dụng dữ kiện trừ khối **SYSTEM** chỉ gắn cho **ACADEMIC**."
+7) Tuyệt đối không dùng thông tin ngoài context, không bịa. Cho phép suy luận hợp lí để cho câu trả lời không quá cụt ngủn dựa trên context.
 
-###Lưu ý: Câu trả lời cuối cùng phải mạch lạc, rõ ràng, có liên kết giữa các phần Q1->Qn, không rời rạc.
+###Lưu ý: Câu trả lời cuối cùng phải mạch lạc, rõ ràng, có liên kết giữa các phần Q1->Qn(kể cả là TEXT-TO-INSERT hay ACADEMIC đều được nối lại thành 1 câu hoàn chỉnh mạch lạc, rõ ràng), không rời rạc.
 
 # 📝 BẮT ĐẦU CÂU TRẢ LỜI TỔNG HỢP:
 """.strip()
@@ -118,8 +118,8 @@ Bạn là trợ giảng môn {subject}. Hãy dùng tiếng Việt để trả l�
 Giải thích "{question}" trong phạm vi {doc_source}, bám sát NGỮ CẢNH, viết mạch lạc.
 
 ĐẦU TIÊN VÀ QUAN TRỌNG:
-1. XÁC ĐỊNH CÂU HỎI {question} có liên quan đến ngữ cảnh được cung cấp không? 
-- Nếu có thì trả lời. 
+1. XÁC ĐỊNH CÂU HỎI {question} có liên quan đến ngữ cảnh được cung cấp không?
+- Nếu có thì trả lời.
 - Nếu không hoặc mơ hồ, không chắc chắn thì trả lời "Tài liệu không đề cập gì về chủ đề {question}."
 2. CÂU TRẢ LỜI PHẢI BẮT BUỘC PHẢI CÓ LIÊN QUAN TRỰC TIẾP 100% ĐẾN {question}.
 3. QUAN TRỌNG: CÂU HỎI - NGỮ CẢNH - CÂU TRẢ LỜI LÀ BỘ 3 LIÊN QUAN, LIÊN KẾT VỚI NHAU .
@@ -135,12 +135,12 @@ Giải thích "{question}" trong phạm vi {doc_source}, bám sát NGỮ CẢNH,
 
 # 🚫 RÀNG BUỘC
 - Chỉ dùng dữ kiện trong NGỮ CẢNH, không bịa, không dẫn ngoài.
-- Trích dẫn nguồn [D#-p#] nếu có trong đoạn NGỮ CẢNH bạn đang sử dụng để trả lời.
+- Trích dẫn số trang là p của "[D#-p#]" nếu có trong đoạn NGỮ CẢNH bạn đang sử dụng để trả lời.
 - Không chào hỏi và nói các câu như "Chào bạn, dựa trên tài liệu, trong ngữ cảnh này,... các câu cứng nhắt" bởi vì nó không được hay như chatbot rag thực thụ.
 - CHỈ trả về câu "Tài liệu không đề cập gì về chủ đề này." KHI TOÀN BỘ NGỮ CẢNH HOÀN TOÀN KHÔNG CÓ THÔNG TIN LIÊN QUAN ĐẾN CÂU HỎI.
 - Văn phong rõ ràng, liền mạch; tránh liệt kê khô cứng.
 
--> Quy tắc trích dẫn dẫn chứng: Khi dùng thông tin từ NGỮ CẢNH, gắn thẻ nguồn ngay sau câu theo tag [D#-p#] đúng như trong NGỮ CẢNH đc cung cấp. Không bịa số trang.
+-> Quy tắc trích dẫn dẫn chứng: Khi dùng thông tin từ NGỮ CẢNH, gắn số trang ngay sau câu dựa vào tag [D#-p#] đúng như trong NGỮ CẢNH đc cung cấp. Không bịa số trang.
 """.strip()
 
 def build_toc_validation_block(toc_lines: list[str]) -> str:
